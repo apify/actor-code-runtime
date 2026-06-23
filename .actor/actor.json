@@ -1,0 +1,38 @@
+{
+    "actorSpecification": 1,
+    "name": "code-runtime",
+    "title": "Code Runtime",
+    "description": "Runs an LLM-submitted TypeScript/JavaScript program in a sandboxed workerd V8 isolate with Apify bindings. One program per run; the captured { stdout, stderr } is pushed as a single item to the default dataset.",
+    "version": "0.1",
+    "buildTag": "latest",
+    "usesStandbyMode": false,
+    "input": {
+        "title": "Code Runtime Input",
+        "description": "The program to run inside the sandbox.",
+        "type": "object",
+        "schemaVersion": 1,
+        "properties": {
+            "code": {
+                "title": "Code",
+                "type": "string",
+                "description": "TypeScript/JavaScript program executed inside the sandbox. It receives an `apify` binding and `console`; stdout and stderr are captured separately and pushed to the default dataset as { stdout, stderr }.",
+                "editor": "javascript"
+            }
+        },
+        "required": ["code"]
+    },
+    "output": {
+        "actorOutputSchemaVersion": 1,
+        "title": "Code Runtime Output",
+        "description": "One dataset item { stdout, stderr } with the program's captured output.",
+        "type": "object",
+        "properties": {
+            "output": {
+                "type": "string",
+                "title": "Execution output",
+                "template": "{{links.apiDefaultDatasetUrl}}/items"
+            }
+        }
+    },
+    "dockerfile": "../Dockerfile"
+}

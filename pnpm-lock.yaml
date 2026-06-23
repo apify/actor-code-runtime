@@ -1,0 +1,75 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      workerd:
+        specifier: 1.20260402.1
+        version: 1.20260402.1
+
+packages:
+
+  '@cloudflare/workerd-darwin-64@1.20260402.1':
+    resolution: {integrity: sha512-/kyyZ5HjOPT202Vsw3P+vICsVulldC9ym+W5UyKl9dufxfHgcdeT4EYtT+tkk+3SlkB1RmoVxgr3VRlqP2ojjw==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@cloudflare/workerd-darwin-arm64@1.20260402.1':
+    resolution: {integrity: sha512-nr+AgUonmepiuD4utn4KQl2fIn/aDuWEO+/B2fzjMnjLSgLpN1IQADUW1uD4FVJdd0ss9ugK1dztFJJWpImCaQ==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@cloudflare/workerd-linux-64@1.20260402.1':
+    resolution: {integrity: sha512-0vJj0pO6ARpCmvyLgbQk204dogL72geEyC+rOnkFgwcDJI4e8oxKrTQZWjPHra3BHUknEomUd37i3K4L4JfU4w==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [linux]
+
+  '@cloudflare/workerd-linux-arm64@1.20260402.1':
+    resolution: {integrity: sha512-aRsxuv1bmwkkX4sG8igutkwVHgsJ1I6mH4/u/1Jfhpb7Bj3xr9p9N2fjDwax+Dhy7xt2tC8TS/ZWLeFFjK2NMA==}
+    engines: {node: '>=16'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@cloudflare/workerd-windows-64@1.20260402.1':
+    resolution: {integrity: sha512-aFKYAuIYTPsuWyHxv39yOFi9bmIvAsIuNmHGYkYltHZUoN4by6tJVCOQUp6PDlZO7TjHSD2XjjM8JBwK/D6tVA==}
+    engines: {node: '>=16'}
+    cpu: [x64]
+    os: [win32]
+
+  workerd@1.20260402.1:
+    resolution: {integrity: sha512-Cg+OUlukdcCHrTTg0MBCIMFRE6XO3yGVGiWCnJPvfffy2Ga2girrEq3qF/YlHSTmbIyEE5ebCFxBYYYZueQ/Mg==}
+    engines: {node: '>=16'}
+    hasBin: true
+
+snapshots:
+
+  '@cloudflare/workerd-darwin-64@1.20260402.1':
+    optional: true
+
+  '@cloudflare/workerd-darwin-arm64@1.20260402.1':
+    optional: true
+
+  '@cloudflare/workerd-linux-64@1.20260402.1':
+    optional: true
+
+  '@cloudflare/workerd-linux-arm64@1.20260402.1':
+    optional: true
+
+  '@cloudflare/workerd-windows-64@1.20260402.1':
+    optional: true
+
+  workerd@1.20260402.1:
+    optionalDependencies:
+      '@cloudflare/workerd-darwin-64': 1.20260402.1
+      '@cloudflare/workerd-darwin-arm64': 1.20260402.1
+      '@cloudflare/workerd-linux-64': 1.20260402.1
+      '@cloudflare/workerd-linux-arm64': 1.20260402.1
+      '@cloudflare/workerd-windows-64': 1.20260402.1
