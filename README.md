@@ -66,7 +66,6 @@ printed before the failure.
 
 - Runs with **limited permissions**: the sandbox has no filesystem and can reach
   only the Apify API (`*.apify.com`).
-- It uses the **run's own token**, so the program can access only what you can.
 - Each run is an isolated, single-use container — nothing persists between runs.
 
 ## The `apify` binding
