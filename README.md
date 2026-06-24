@@ -6,14 +6,14 @@
 
 ## What it does
 
-This Actor executes a single TypeScript/JavaScript program that an AI agent
+This Actor executes a single TypeScript/JavaScript script that an AI agent
 submits through the Apify MCP Server's **Code Mode**, then returns whatever the
-program printed.
+script printed.
 
-Code Mode exists so an agent can do many Apify operations in **one** program —
+Code Mode exists so an agent can do many Apify operations in **one go** —
 search the Store, run an Actor, read its dataset, filter and aggregate the
 results — instead of sending every intermediate result back through the model.
-This Actor is the sandbox that runs that program.
+This Actor is the sandbox that runs that script.
 
 ## Enabling Code Mode on the MCP Server
 
@@ -29,16 +29,49 @@ For full configuration options, use the configurator at
 
 ## How it works
 
-- **One program per run.** The Actor reads your `code`, runs it once, writes the
+- **One script per run.** The Actor reads your `code`, runs it once, writes the
   result, and exits.
 - The code runs inside a [`workerd`](https://github.com/cloudflare/workerd) V8
   isolate: **no filesystem, no package imports**, and outbound network is
   restricted to `*.apify.com`.
-- Inside the program a global **`apify`** object exposes a small, typed subset of
+- Inside the script a global **`apify`** object exposes a small, typed subset of
   the Apify API — run Actors, read/write datasets and key-value stores — using
-  the current run's token.
+  the current run's token (see below).
 - `console.log` / `console.info` go to **stdout**; `console.error` /
   `console.warn` go to **stderr**. The two streams are captured separately.
+
+## The `apify` binding
+
+Every method takes one options object and returns parsed JSON
+(`?` = optional, `= x` = default):
+
+```js
+// Actors
+apify.actor.search({ query, limit?, category? })            // → actors[]
+apify.actor.getDetails({ actorId })                         // → actor
+apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
+apify.actor.run({ actorId, ...startOpts, waitForFinishSecs = 60 })            // → run (waits)
+apify.actor.runAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }
+
+// Runs
+apify.run.get({ runId })                                    // → run
+apify.run.wait({ runId, waitForFinishSecs = 60 })           // → run
+apify.run.abort({ runId })                                  // → run
+apify.run.getLog({ runId, limit? })                         // → string
+
+// Datasets
+apify.dataset.create({ name? })                             // → dataset
+apify.dataset.pushItems({ datasetId, items })               // → void
+apify.dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })  // → items[]
+apify.dataset.iterate({ datasetId, batchSize = 1000, ...filters })  // → async iterable
+apify.dataset.getSchema({ datasetId, sample = 5 })          // → { itemCount, fields[] }
+
+// Key-value stores
+apify.kvs.create({ name? })                                 // → store
+apify.kvs.set({ storeId, key, value, contentType? })        // → void
+apify.kvs.get({ storeId, key })                             // → value | null
+apify.kvs.list({ storeId, limit?, exclusiveStartKey? })     // → { items }
+```
 
 ## Input
 
@@ -50,7 +83,7 @@ For full configuration options, use the configurator at
 
 | Field | Type | Description |
 |---|---|---|
-| `code` | string | The TypeScript/JavaScript program to run. It receives the `apify` binding and `console`. |
+| `code` | string | The TypeScript/JavaScript script to run. It receives the `apify` binding and `console`. |
 
 ## Output
 
@@ -60,7 +93,7 @@ A single **dataset item** with the captured streams:
 { "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "" }
 ```
 
-If the program throws, the error lands in `stderr`; `stdout` keeps whatever was
+If the script throws, the error lands in `stderr`; `stdout` keeps whatever was
 printed before the failure.
 
 ## Permissions & safety
