@@ -71,7 +71,8 @@ printed before the failure.
 ## The `apify` binding
 
 Every method takes one options object and returns parsed JSON
-(`?` = optional, `= x` = default):
+(`?` = optional, `= x` = default). Full API documentation is available
+[here](https://github.com/apify/actor-code-runtime/blob/master/docs/API.md).
 
 ```js
 // Actors
