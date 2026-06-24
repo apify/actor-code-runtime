@@ -6,14 +6,13 @@
 
 ## What it does
 
-This Actor executes a single TypeScript/JavaScript script that an AI agent
-submits through the Apify MCP Server's **Code Mode**, then returns whatever the
-script printed.
+This Actor executes TypeScript/JavaScript that an AI agent submits through the
+Apify MCP Server's **Code Mode**, then returns whatever the script printed.
 
 Code Mode exists so an agent can do many Apify operations in **one go** —
 search the Store, run an Actor, read its dataset, filter and aggregate the
-results — instead of sending every intermediate result back through the model.
-This Actor is the sandbox that runs that script.
+results — instead of sending every intermediate result back through the model
+and wasting tokens. This Actor is the sandbox that runs that script.
 
 ## Enabling Code Mode on the MCP Server
 
@@ -39,6 +38,36 @@ For full configuration options, use the configurator at
   the current run's token (see below).
 - `console.log` / `console.info` go to **stdout**; `console.error` /
   `console.warn` go to **stderr**. The two streams are captured separately.
+
+## Input
+
+```json
+{
+  "code": "const { items } = await apify.actor.runAndGetItems({ actorId: 'apify/rag-web-browser', input: { query: 'apify' }, limit: 3 });\nconsole.log(items.map((i) => i.metadata?.title).join('\\n'));"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `code` | string | The TypeScript/JavaScript script to run. It receives the `apify` binding and `console`. |
+
+## Output
+
+A single **dataset item** with the captured streams:
+
+```json
+{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "" }
+```
+
+If the script throws, the error lands in `stderr`; `stdout` keeps whatever was
+printed before the failure.
+
+## Permissions & safety
+
+- Runs with **limited permissions**: the sandbox has no filesystem and can reach
+  only the Apify API (`*.apify.com`).
+- It uses the **run's own token**, so the program can access only what you can.
+- Each run is an isolated, single-use container — nothing persists between runs.
 
 ## The `apify` binding
 
@@ -72,36 +101,6 @@ apify.kvs.set({ storeId, key, value, contentType? })        // → void
 apify.kvs.get({ storeId, key })                             // → value | null
 apify.kvs.list({ storeId, limit?, exclusiveStartKey? })     // → { items }
 ```
-
-## Input
-
-```json
-{
-  "code": "const { items } = await apify.actor.runAndGetItems({ actorId: 'apify/rag-web-browser', input: { query: 'apify' }, limit: 3 });\nconsole.log(items.map((i) => i.metadata?.title).join('\\n'));"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `code` | string | The TypeScript/JavaScript script to run. It receives the `apify` binding and `console`. |
-
-## Output
-
-A single **dataset item** with the captured streams:
-
-```json
-{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "" }
-```
-
-If the script throws, the error lands in `stderr`; `stdout` keeps whatever was
-printed before the failure.
-
-## Permissions & safety
-
-- Runs with **limited permissions**: the sandbox has no filesystem and can reach
-  only the Apify API (`*.apify.com`).
-- It uses the **run's own token**, so the program can access only what you can.
-- Each run is an isolated, single-use container — nothing persists between runs.
 
 ## Learn more
 
