@@ -53,14 +53,17 @@ For full configuration options, use the configurator at
 
 ## Output
 
-A single **dataset item** with the captured streams:
+A single **dataset item** with the captured streams and the script's exit status:
 
 ```json
-{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "" }
+{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "", "exitCode": 0 }
 ```
 
-If the script throws, the error lands in `stderr`; `stdout` keeps whatever was
-printed before the failure.
+If the script throws, the error lands in `stderr`, `stdout` keeps whatever was
+printed before the failure, and `exitCode` is `1`. The Actor run itself still
+**succeeds** — `exitCode` is the reliable signal for a failed script (`0` = the
+script returned normally, `1` = it threw), since `stderr` is also a legitimate
+log channel (`console.error` / `console.warn`).
 
 ## Permissions & safety
 

@@ -274,13 +274,20 @@ export default {
         // A thrown program is a user-level failure: capture it in stderr and still
         // push the output, so the run SUCCEEDS with diagnostics. Infra failures
         // (missing env, dataset push) throw and fail the run.
+        //
+        // exitCode is the user script's effective status, distinct from the Actor run's
+        // status: 0 when the script returns normally, 1 when it throws. The run itself
+        // still SUCCEEDS on a throw, so callers detect a failed script via this field
+        // rather than heuristics on stderr (console.error is a legitimate log channel).
+        let exitCode = 0;
         try {
             await run(makeApifyBinding(token, apiV2), captureConsole);
         } catch (err) {
             stderr.push(err?.stack ?? err?.message ?? String(err));
+            exitCode = 1;
         }
 
-        await pushOutput(apiV2, token, env, { stdout: stdout.join('\n'), stderr: stderr.join('\n') });
+        await pushOutput(apiV2, token, env, { stdout: stdout.join('\n'), stderr: stderr.join('\n'), exitCode });
         return Response.json({ ok: true });
     },
 };

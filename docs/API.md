@@ -363,15 +363,22 @@ isTruncated, exclusiveStartKey, nextExclusiveStartKey }`.
 | `console.error`, `console.warn` | **stderr** |
 
 Non-string arguments are `JSON.stringify`'d. When the script finishes, both
-streams are written to the run's default dataset as a single item:
+streams and the script's exit status are written to the run's default dataset as
+a single item:
 
 ```json
-{ "stdout": "...", "stderr": "..." }
+{ "stdout": "...", "stderr": "...", "exitCode": 0 }
 ```
+
+`exitCode` is the script's effective exit status: `0` when it returns normally,
+`1` when it throws. It is distinct from the Actor run's status — see below.
 
 ## Error handling
 
 - A non-2xx API response throws `Error: <METHOD> <path> failed: <status> <body>`.
-- If your script throws, the error (stack/message) is appended to **stderr** and
-  the run still **succeeds** with whatever was printed beforehand — so failures
-  are observable in the output rather than crashing the run.
+- If your script throws, the error (stack/message) is appended to **stderr**,
+  `exitCode` is set to `1`, and the run still **succeeds** with whatever was
+  printed beforehand — so failures are observable in the output rather than
+  crashing the run. Check `exitCode` (not `stderr`) to detect a failed script:
+  `stderr` may be non-empty from ordinary `console.error` / `console.warn`
+  logging even on a successful run.
