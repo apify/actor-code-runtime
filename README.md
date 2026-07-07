@@ -31,8 +31,10 @@ For full configuration options, use the configurator at
 - **One script per run.** The Actor reads your `code`, runs it once, writes the
   result, and exits.
 - The code runs inside a [`workerd`](https://github.com/cloudflare/workerd) V8
-  isolate: **no filesystem, no package imports**, and outbound network is
-  restricted to `*.apify.com`.
+  isolate: **no imports** — neither npm packages nor Node built-in `node:*`
+  modules are available (`import`/`require` of any module fails); web-standard
+  globals such as `fetch` are present. Outbound network is restricted to
+  `*.apify.com`.
 - Inside the script a global **`apify`** object exposes a small, typed subset of
   the Apify API — run Actors, read/write datasets and key-value stores — using
   the current run's token (see below).
@@ -69,6 +71,11 @@ log channel (`console.error` / `console.warn`).
 
 - Runs with **limited permissions**: the sandbox has no filesystem and can reach
   only the Apify API (`*.apify.com`).
+- **No imports.** The isolate runs without workerd's `nodejs_compat`, so user
+  code cannot import Node built-ins (`node:net`, `node:fs`, …) or npm packages.
+  This removes `node:net` — a raw-socket egress path that would otherwise bypass
+  the `fetch` allowlist — and keeps the run token out of `process.env` (which is
+  not defined).
 - Each run is an isolated, single-use container — nothing persists between runs.
 
 ## The `apify` binding

@@ -35,5 +35,9 @@ const codeRuntime :Workerd.Worker = (
     ],
     globalOutbound = "internet",
     compatibilityDate = "2026-01-15",
-    compatibilityFlags = ["nodejs_compat"],
+    # No nodejs_compat: user code runs with web-standard APIs only. This is a
+    # security boundary, not a convenience toggle — the flag would expose node:net
+    # (a raw-socket egress path that bypasses guard.js's *.apify.com fetch allowlist)
+    # and process.env (which holds the run's APIFY_TOKEN). runner.js and guard.js use
+    # only web-standard APIs (fetch/URL/Response/Uint8Array), so they need nothing here.
 );
