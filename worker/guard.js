@@ -1,11 +1,16 @@
-// Restrict the user program's global fetch() to apify.com and its subdomains.
-// Imported before usercode.js so the override is in place even for code that
+// Restrict the user program's outbound network to apify.com and its subdomains.
+// Imported before usercode.js so the overrides are in place even for code that
 // runs at module-evaluation time. Our own Apify API calls use the exported
 // realFetch (the internal API is a private IP, not *.apify.com), so they are
 // unaffected by this guard.
 //
-// NOTE: this guards the fetch() API only. It is not a complete egress boundary —
-// the airtight control is workerd's globalOutbound. See SECURITY notes in the repo.
+// Egress surface (workerd, no nodejs_compat): the only JS-reachable outbound
+// primitives are fetch, WebSocket, and EventSource. Raw sockets (node:net,
+// cloudflare:sockets connect()) need module imports, which are already blocked.
+// fetch is allowlisted below; WebSocket and EventSource are removed outright
+// because runner.js and the apify binding never use them — leaving them would
+// be a non-fetch egress path around the allowlist (apify/ai-team#216 finding A,
+// via WebSocket). If a future need arises, wrap them like fetch instead.
 
 const realFetch = globalThis.fetch.bind(globalThis);
 
@@ -41,5 +46,24 @@ globalThis.fetch = (input, init) => {
     }
     return realFetch(input, init);
 };
+
+// Remove the non-fetch egress primitives. These are web-standard globals present
+// even without nodejs_compat, and they connect directly (not through the fetch
+// guard), so a script could otherwise open a wss:// or SSE connection to any
+// public host and exfiltrate data around the *.apify.com allowlist.
+function blockGlobal(name) {
+    const blocked = function () {
+        throw new Error(`Blocked ${name}: only fetch() to apify.com and its subdomains is allowed`);
+    };
+    Object.defineProperty(globalThis, name, {
+        value: blocked,
+        writable: false,
+        configurable: false,
+        enumerable: false,
+    });
+}
+for (const name of ['WebSocket', 'EventSource']) {
+    if (name in globalThis) blockGlobal(name);
+}
 
 export { realFetch };

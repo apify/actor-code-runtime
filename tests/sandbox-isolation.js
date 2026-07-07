@@ -65,6 +65,23 @@ for (const url of blockedTargets) {
     check(`block ${url}`, await guardBlocks(url), 'blocked by guard');
 }
 
+// Non-fetch egress primitives must be neutralized: WebSocket and EventSource
+// are web-standard globals that connect directly (not through the fetch guard),
+// so a script could otherwise open a wss:// / SSE channel to any public host and
+// exfiltrate around the *.apify.com allowlist (apify/ai-team#216 finding A).
+function blocksConstruct(name, url) {
+    const Ctor = globalThis[name];
+    if (typeof Ctor !== 'function') return true; // absent → not an egress path
+    try {
+        new Ctor(url);
+        return false; // constructed → egress opened
+    } catch (e) {
+        return /Blocked/.test(e.message); // our guard rejection vs. any other error
+    }
+}
+check('WebSocket blocked', blocksConstruct('WebSocket', 'wss://echo.websocket.org'), 'no wss egress');
+check('EventSource blocked', blocksConstruct('EventSource', 'https://example.com/sse'), 'no SSE egress');
+
 // The apify binding must still work (fetch to *.apify.com).
 let bindingWorks = false;
 try {
