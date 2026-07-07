@@ -34,10 +34,36 @@ check('require undefined', typeof require === 'undefined', `typeof require = ${t
 // fetch must remain — the apify binding depends on it.
 check('fetch available', typeof fetch === 'function', `typeof fetch = ${typeof fetch}`);
 
-// guard.js must still block a non-apify host over fetch.
-let nonApifyBlocked = false;
-try { await fetch('https://example.com'); } catch { nonApifyBlocked = true; }
-check('non-apify fetch blocked', nonApifyBlocked, nonApifyBlocked ? 'blocked' : 'REACHED example.com (leak!)');
+// guard.js allowlist: apify.com and *.apify.com only. A guard rejection throws
+// synchronously with a "Blocked fetch" message BEFORE any network I/O; anything
+// else (a real network/HTTP error) means guard let the request through. So we
+// classify by the error message, not by whether the request ultimately succeeds.
+async function guardBlocks(url) {
+    try {
+        await fetch(url);
+        return false; // request went out — guard allowed it
+    } catch (e) {
+        return /Blocked fetch/.test(e.message); // guard rejection vs. network error
+    }
+}
+
+// Allowed: the main domain and any subdomain must NOT be guard-blocked.
+for (const url of ['https://apify.com/', 'https://api.apify.com/v2/browser-info']) {
+    check(`allow ${url}`, !(await guardBlocks(url)), 'not blocked by guard');
+}
+
+// Blocked: other public hosts, subdomain look-alikes, userinfo/host tricks, and
+// the cloud metadata IP must all be guard-blocked.
+const blockedTargets = [
+    'https://example.com/', // unrelated public host
+    'https://evilapify.com/', // suffix without the dot — must not match .apify.com
+    'https://apify.com.evil.com/', // real host is evil.com
+    'https://apify.com@evil.com/', // userinfo trick — real host is evil.com
+    'http://169.254.169.254/', // cloud link-local metadata
+];
+for (const url of blockedTargets) {
+    check(`block ${url}`, await guardBlocks(url), 'blocked by guard');
+}
 
 // The apify binding must still work (fetch to *.apify.com).
 let bindingWorks = false;
