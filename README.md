@@ -15,17 +15,27 @@ search the Store, run an Actor, read its dataset, filter and aggregate the
 results — instead of sending every intermediate result back through the model
 and wasting tokens. This Actor is the sandbox that runs that script.
 
-## Enabling Code Mode on the MCP Server
+**Best suited for data-heavy jobs** — scraping hundreds or thousands of
+places/items via an Actor, then filtering, sorting, or aggregating them
+locally before returning a small summary. **Weaker fit** for steps that
+require reading or judging free text (picking a fact out of an article,
+choosing a search term) — keep the model in the loop there instead; a wrong
+guess inside the sandbox fails silently until the whole script finishes.
 
-Code Mode is opt-in. Add the Code Mode tools to the `tools` query parameter of
-your mcp.apify.com connection URL:
+## Calling this Actor
+
+Self-contained — no special MCP-server opt-in required. Any MCP client
+already has `search-actors`, `fetch-actor-details`, and `call-actor` as
+default tools:
 
 ```
-https://mcp.apify.com/?tools=run-code,get-code-docs
+call-actor({ actor: "apify/code-runtime", input: { code: "..." } })
 ```
 
-For full configuration options, use the configurator at
-[mcp.apify.com](https://mcp.apify.com).
+Or via the raw API: `POST /v2/acts/apify~code-runtime/runs` with `{ code }`
+as the body. Results land in the run's default dataset, same as any Actor
+call — follow the response's `nextStep` (or call `get-dataset-items`/
+`GET /v2/datasets/{datasetId}/items`) to read it.
 
 ## How it works
 
@@ -41,12 +51,22 @@ For full configuration options, use the configurator at
   the current run's token (see below).
 - `console.log` / `console.info` go to **stdout**; `console.error` /
   `console.warn` go to **stderr**. The two streams are captured separately.
+- Before running an Actor from your script, call `apify.actor.get({ actorId })`
+  once to read its input/output schema.
+- As each nested run finishes, log its `run.id` / `defaultDatasetId` /
+  `defaultKeyValueStoreId` **before** processing its output — if the script
+  then throws, a re-run can read those existing storages instead of paying to
+  re-run the Actor (nothing persists between this Actor's own runs, but the
+  Actors it started keep their results).
+- Print a small, JSON-stringified summary of the result — never dump full
+  datasets. Only what you `console.log`/`console.info` comes back; a
+  top-level `return` value is **not** captured.
 
 ## Input
 
 ```json
 {
-  "code": "const { items } = await apify.actor.runAndGetItems({ actorId: 'apify/rag-web-browser', input: { query: 'apify' }, limit: 3 });\nconsole.log(items.map((i) => i.metadata?.title).join('\\n'));"
+  "code": "const { items } = await apify.actor.callAndGetItems({ actorId: 'apify/rag-web-browser', input: { query: 'apify' }, limit: 3 });\nconsole.log(items.map((i) => i.metadata?.title).join('\\n'));"
 }
 ```
 
@@ -56,28 +76,100 @@ For full configuration options, use the configurator at
 
 ## Output
 
-A single **dataset item** with the captured streams and the script's exit status:
+A single **dataset item** with the captured streams, the script's exit
+status, and a prose status message:
 
 ```json
-{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "", "exitCode": 0 }
+{ "stdout": "Apify: Full-stack web scraping ...\n...", "stderr": "", "exitCode": 0, "statusMessage": "Script completed" }
 ```
 
 If the script throws, the error lands in `stderr`, `stdout` keeps whatever was
-printed before the failure, and `exitCode` is `1`. The Actor run itself still
-**succeeds** — `exitCode` is the reliable signal for a failed script (`0` = the
-script returned normally, `1` = it threw), since `stderr` is also a legitimate
-log channel (`console.error` / `console.warn`).
+printed before the failure, `exitCode` is `1`, and `statusMessage` is
+`"Script threw: ..."`. The Actor run itself still **succeeds** — check
+`exitCode`/`statusMessage`, not `stderr` content, to detect a failed script,
+since `stderr` is also a legitimate log channel (`console.error` /
+`console.warn`).
+
+If the script fails to **compile** (a syntax error), the same contract
+applies — `exitCode: 1`, `statusMessage: "Failed to compile: ..."` — pushed
+by the container entrypoint directly, since a malformed script never reaches
+the sandboxed worker at all.
+
+A run-level **timeout or out-of-memory kill** is a different, third outcome:
+the container is killed before it can push anything, so this dataset item may
+not exist for that run at all. That case is signaled by the Actor run's own
+status (`SUCCEEDED` vs `FAILED`/`TIMED-OUT`), not by this item's absence —
+see [Limits & failure modes](#limits--failure-modes).
+
+## Limits & failure modes
+
+- Default `defaultRunOptions`: `timeoutSecs: 900`, `memoryMbytes: 1024`
+  (`.actor/actor.json`). Override per call — e.g. the MCP `call-actor` tool's
+  `callOptions.timeout`/`callOptions.memory`, or the API's `timeout`/`memory`
+  run options — for scripts that chain several long-running Actor calls.
+- `exitCode`/`statusMessage` signal the **script's** outcome only (returned /
+  threw / failed to compile). A resource-limit kill is a **run-level**
+  outcome instead — check the Actor run's own `status`, not this dataset
+  item, for that case (see [Output](#output) above).
 
 ## Permissions & safety
 
-- Runs with **limited permissions**: the sandbox has no filesystem and can reach
-  only the Apify API (`*.apify.com`).
+- Runs with **limited permissions**: the sandbox has no filesystem and
+  outbound `fetch` (including through redirects, which are re-validated per
+  hop) is limited to the Apify API (`*.apify.com`).
 - **No imports.** The isolate runs without workerd's `nodejs_compat`, so user
   code cannot import Node built-ins (`node:net`, `node:fs`, …) or npm packages.
   This removes `node:net` — a raw-socket egress path that would otherwise bypass
   the `fetch` allowlist — and keeps the run token out of `process.env` (which is
   not defined).
 - Each run is an isolated, single-use container — nothing persists between runs.
+- This closes off **direct fetch-based exfil** from the container — it does not
+  stop every path to move data out (e.g. `actor.start({ input })` on an Actor
+  with its own open internet access, or writing to a dataset/key-value store).
+
+## Recipes
+
+### Bounded parallel fan-out
+
+This Actor's clearest win: run several independent Actors (or the same Actor
+over several inputs) concurrently, then reduce before returning. Chunk the
+fan-out (e.g. 5–10 at a time) — an unbounded `Promise.all` over many inputs
+can hit your account's concurrent-run or memory limits.
+
+```js
+const inputs = [{ query: 'a' }, { query: 'b' }, { query: 'c' } /* ... */];
+const CHUNK = 5;
+const results = [];
+for (let i = 0; i < inputs.length; i += CHUNK) {
+    const batch = inputs.slice(i, i + CHUNK);
+    const batchResults = await Promise.all(
+        batch.map((input) => apify.actor.callAndGetItems({ actorId: 'apify/rag-web-browser', input, limit: 5 })),
+    );
+    results.push(...batchResults.flatMap((r) => r.items));
+}
+console.log(JSON.stringify(results.slice(0, 5))); // small summary, not the full dump
+```
+
+### Runs longer than 60s: start, then poll
+
+`actor.call`'s wait is capped at 60s per request (a REST API limit, not this
+Actor's). For a longer-running Actor, start it and poll:
+
+```js
+let run = await apify.actor.start({ actorId, input });
+const TERMINAL = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'];
+while (!TERMINAL.includes(run.status)) {
+    run = await apify.run.waitForFinish({ runId: run.id, waitForFinishSecs: 60 });
+}
+```
+
+## Limitations
+
+Actor runs launched from inside the sandbox (via the `apify` binding) are
+recorded as ordinary Actor runs — they aren't attributed back to the MCP
+session that ultimately triggered them. If you're measuring "Actor runs
+driven by MCP," Code Mode's sub-runs won't show up as such. Known,
+unresolved, tracked separately from this Actor.
 
 ## The `apify` binding
 
@@ -90,12 +182,12 @@ Every method takes one options object and returns parsed JSON
 apify.actor.search({ query, limit?, category? })            // → actors[]
 apify.actor.get({ actorId })                                  // → actor
 apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
-apify.actor.run({ actorId, ...startOpts, waitForFinishSecs = 60 })            // → run (waits)
-apify.actor.runAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }
+apify.actor.call({ actorId, ...startOpts, waitForFinishSecs = 60 })           // → run (waits)
+apify.actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }
 
 // Runs
 apify.run.get({ runId })                                    // → run
-apify.run.wait({ runId, waitForFinishSecs = 60 })           // → run
+apify.run.waitForFinish({ runId, waitForFinishSecs = 60 })  // → run
 apify.run.abort({ runId })                                  // → run
 apify.run.getLog({ runId, limit? })                         // → string
 
@@ -104,7 +196,7 @@ apify.dataset.create({ name? })                             // → dataset
 apify.dataset.pushItems({ datasetId, items })               // → void
 apify.dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })  // → items[]
 apify.dataset.iterate({ datasetId, batchSize = 1000, ...filters })  // → async iterable
-apify.dataset.getSchema({ datasetId, sample = 5 })          // → { itemCount, fields[] }
+apify.dataset.inferFields({ datasetId, sample = 5 })        // → { itemCount, fields[] }
 
 // Key-value stores
 apify.kvs.create({ name? })                                 // → store

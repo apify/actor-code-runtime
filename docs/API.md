@@ -77,7 +77,7 @@ Start an Actor **asynchronously** and return immediately with a run record in
 **Output:** the Run object (unwrapped `data`).
 **Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
 
-### `actor.run({ actorId, input?, waitForFinishSecs?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })` → `Run`
+### `actor.call({ actorId, input?, waitForFinishSecs?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })` → `Run`
 
 Start an Actor and **wait** for it to finish (or until `waitForFinishSecs`
 elapses), then return the run record.
@@ -86,7 +86,7 @@ elapses), then return the run record.
 |---|---|---|---|---|
 | `actorId` | `string` | yes | | `username/name` or Actor ID. |
 | `input` | `object` | no | `{}` | Actor input. |
-| `waitForFinishSecs` | `number` | no | `60` | Seconds to wait (`waitForFinish`). **The Apify API caps a single wait at 60s** — for longer runs use `start()` + a `run.wait()` loop. |
+| `waitForFinishSecs` | `number` | no | `60` | Seconds to wait (`waitForFinish`). **The Apify API caps a single wait at 60s** — for longer runs use `start()` + a `run.waitForFinish()` loop. |
 | `memoryMbytes` | `number` | no | | Memory limit. |
 | `timeoutSecs` | `number` | no | | Run timeout. |
 | `maxTotalChargeUsd` | `number` | no | | Cost cap. |
@@ -97,9 +97,9 @@ elapses), then return the run record.
 (not `/run-sync`, which returns the output record instead of the run object).
 **Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
 
-### `actor.runAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })` → `{ run, items }`
+### `actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })` → `{ run, items }`
 
-Convenience wrapper: `actor.run(...)` followed by reading the run's default
+Convenience wrapper: `actor.call(...)` followed by reading the run's default
 dataset via `dataset.listItems`.
 
 | Param | Type | Required | Description |
@@ -108,13 +108,13 @@ dataset via `dataset.listItems`.
 | `input` | `object` | no | Actor input. |
 | `fields` | `string[]` | no | Restrict returned item fields. |
 | `limit` | `number` | no | Max items to fetch. |
-| `...runOpts` | | no | Any `actor.run` option (`waitForFinishSecs`, `memoryMbytes`, `timeoutSecs`, `maxTotalChargeUsd`, `maxItems`). |
+| `...runOpts` | | no | Any `actor.call` option (`waitForFinishSecs`, `memoryMbytes`, `timeoutSecs`, `maxTotalChargeUsd`, `maxItems`). |
 
 **Output (custom):**
 
 ```js
 {
-  run: Run,        // the run object, as actor.run returns
+  run: Run,        // the run object, as actor.call returns
   items: object[]  // items from run.defaultDatasetId
 }
 ```
@@ -123,7 +123,7 @@ dataset via `dataset.listItems`.
 then [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get)
 
 ```js
-const { run, items } = await apify.actor.runAndGetItems({
+const { run, items } = await apify.actor.callAndGetItems({
     actorId: 'apify/rag-web-browser',
     input: { query: 'apify' },
     limit: 3,
@@ -146,7 +146,7 @@ Fetch the current run record (status, stats, default storage IDs).
 **Output:** the Run object (unwrapped `data`).
 **Apify API:** [`GET /v2/actor-runs/{runId}`](https://docs.apify.com/api/v2/actor-run-get)
 
-### `run.wait({ runId, waitForFinishSecs? })` → `Run`
+### `run.waitForFinish({ runId, waitForFinishSecs? })` → `Run`
 
 Block until the run terminates or `waitForFinishSecs` elapses, whichever comes
 first, then return the run record.
@@ -228,7 +228,7 @@ Read a page of items.
 **Output (custom):** the **items array directly** — this endpoint already
 returns a bare array (no `data`/pagination wrapper). A dataset's pagination
 total is eventually consistent right after creation, so no `total` is surfaced;
-use [`getSchema`](#datasetgetschema--schema) for a count or
+use [`inferFields`](#datasetinferfields--schema) for a count or
 [`iterate`](#datasetiterate--asyncgeneratorobject) to consume everything.
 **Apify API:** [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get)
 
@@ -255,7 +255,7 @@ for await (const item of apify.dataset.iterate({ datasetId })) count++;
 console.log('total items:', count);
 ```
 
-### `dataset.getSchema({ datasetId, sample? })` → `Schema`
+### `dataset.inferFields({ datasetId, sample? })` → `Schema`
 
 Infer a lightweight schema from a sample of items (Apify has no schema endpoint).
 

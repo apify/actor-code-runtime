@@ -2,10 +2,14 @@
     "actorSpecification": 1,
     "name": "code-runtime",
     "title": "Code Runtime",
-    "description": "Runs an LLM-submitted JavaScript program in a sandboxed workerd V8 isolate with Apify bindings. One program per run; the captured { stdout, stderr } is pushed as a single item to the default dataset.",
+    "description": "Runs one JS script in a sandboxed Actor with an apify binding (run Actors, datasets & KV stores). Best for data-heavy jobs: scrape hundreds+ places/items, chain Actor outputs, and filter/sort/aggregate in one billed run. Results land in the dataset.",
     "version": "0.1",
     "buildTag": "latest",
     "usesStandbyMode": false,
+    "defaultRunOptions": {
+        "timeoutSecs": 900,
+        "memoryMbytes": 1024
+    },
     "input": {
         "title": "Code Runtime Input",
         "description": "The program to run inside the sandbox.",
@@ -15,7 +19,7 @@
             "code": {
                 "title": "Code",
                 "type": "string",
-                "description": "JavaScript program executed inside the sandbox (JS only — nothing transpiles it, so a TypeScript type annotation is a SyntaxError at load). It receives an `apify` binding and `console`; stdout and stderr are captured separately and pushed to the default dataset as { stdout, stderr }.",
+                "description": "JavaScript executed in the sandbox with `apify` and `console` globals; only console output is captured and pushed to the dataset as { stdout, stderr, exitCode, statusMessage } — a top-level `return` value is NOT captured. Call apify.actor.get({ actorId }) before running an Actor, to read its schema first. Print a small JSON summary of the result — never dump full datasets.",
                 "editor": "javascript"
             }
         },
@@ -24,13 +28,47 @@
     "output": {
         "actorOutputSchemaVersion": 1,
         "title": "Code Runtime Output",
-        "description": "One dataset item { stdout, stderr } with the program's captured output.",
+        "description": "One dataset item { stdout, stderr, exitCode, statusMessage } (exitCode: 0=returned, 1=threw); see the exitCode field description for the timeout/OOM case.",
         "type": "object",
         "properties": {
             "output": {
                 "type": "string",
                 "title": "Execution output",
                 "template": "{{links.apiDefaultDatasetUrl}}/items"
+            }
+        }
+    },
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "description": "Present only if the script ran to completion (returned or threw). A run-level timeout or OOM kill produces zero items for that run — the calling Actor-run's own status (SUCCEEDED vs FAILED/TIMED-OUT) is the signal for that case, not item presence.",
+            "fields": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "stdout": {
+                        "type": "string",
+                        "title": "stdout",
+                        "description": "Captured console.log/console.info output."
+                    },
+                    "stderr": {
+                        "type": "string",
+                        "title": "stderr",
+                        "description": "Captured console.error/console.warn output, plus the thrown error (or compile failure) message when exitCode is 1."
+                    },
+                    "exitCode": {
+                        "type": "integer",
+                        "enum": [0, 1],
+                        "title": "Exit code",
+                        "description": "0 = script returned normally, 1 = script threw (or failed to compile)."
+                    },
+                    "statusMessage": {
+                        "type": "string",
+                        "title": "Status message",
+                        "description": "Prose form of the same signal: 'Script completed' / 'Script threw: ...' / 'Failed to compile: ...'."
+                    }
+                },
+                "required": ["stdout", "stderr", "exitCode", "statusMessage"]
             }
         }
     },

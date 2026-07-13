@@ -1,7 +1,7 @@
 {
     "name": "code-runtime",
     "version": "0.1.0",
-    "description": "workerd as a normal (per-run) Apify Actor; one V8 isolate per run via the Worker Loader API.",
+    "description": "workerd as a normal (per-run) Apify Actor: one static worker, booted once per run, runs the submitted script and exits.",
     "private": true,
     "packageManager": "pnpm@11.1.3",
     "dependencies": {
