@@ -1,8 +1,9 @@
 // Restrict the user program's outbound network to apify.com and its subdomains.
 // Imported before usercode.js so the overrides are in place even for code that
-// runs at module-evaluation time. Our own Apify API calls use the exported
-// realFetch (the internal API is a private IP, not *.apify.com), so they are
-// unaffected by this guard.
+// runs at module-evaluation time. Our own Apify API calls use the real,
+// unrestricted fetch (the internal API is a private IP, not *.apify.com) —
+// see claimRealFetch() below for how runner.js gets it without leaving it
+// reachable from user code.
 //
 // Egress surface (workerd, no nodejs_compat): the only JS-reachable outbound
 // primitives are fetch, WebSocket, and EventSource. Raw sockets (node:net,
@@ -13,6 +14,21 @@
 // via WebSocket). If a future need arises, wrap them like fetch instead.
 
 const realFetch = globalThis.fetch.bind(globalThis);
+
+// One-shot handoff of the unrestricted fetch to runner.js. ES modules are
+// evaluated once and cached, so `guard.js` is the same module instance no
+// matter who imports it. runner.js imports this module (and calls
+// claimRealFetch()) before usercode.js is ever imported, so it always claims
+// first. If the sandboxed script later does `await import('./guard.js')` to
+// try to recover the unrestricted fetch, it gets this same cached instance —
+// but the value is already gone. A standing `export { realFetch }` would hand
+// it to that later import too; don't reintroduce one.
+let unclaimedRealFetch = realFetch;
+export function claimRealFetch() {
+    const fetchFn = unclaimedRealFetch;
+    unclaimedRealFetch = null;
+    return fetchFn;
+}
 
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
@@ -65,5 +81,3 @@ function blockGlobal(name) {
 for (const name of ['WebSocket', 'EventSource']) {
     if (name in globalThis) blockGlobal(name);
 }
-
-export { realFetch };

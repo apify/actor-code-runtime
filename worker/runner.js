@@ -8,9 +8,16 @@
 // Loader / per-request isolate is needed — the program runs in this worker,
 // which is itself the sandbox (no filesystem, restricted outbound network).
 // guard.js must be imported before usercode.js: it overrides globalThis.fetch
-// to allow only apify.com, and exports realFetch for our own (internal) API calls.
-import { realFetch } from './guard.js';
+// to allow only apify.com, and hands us the real, unrestricted fetch via a
+// one-shot claimRealFetch() for our own (internal) API calls — see guard.js
+// for why this is a claim, not a standing export.
+import { claimRealFetch } from './guard.js';
 import { run } from './usercode.js';
+
+// Must run before usercode.js's `run()` is ever invoked (it does, here — module
+// evaluation order puts this ahead of any dynamic import from inside `run()`).
+const realFetch = claimRealFetch();
+if (!realFetch) throw new Error('realFetch already claimed — guard.js imported out of order.');
 
 const DEFAULT_ITERATE_BATCH = 1000;
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
