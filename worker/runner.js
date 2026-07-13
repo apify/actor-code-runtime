@@ -34,8 +34,8 @@ function makeApifyBinding(token, apiV2) {
     const buildUrl = (path, searchParams) => {
         const url = new URL(`${apiV2}${path}`);
         if (searchParams) {
-            for (const [k, v] of Object.entries(searchParams)) {
-                if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+            for (const [key, value] of Object.entries(searchParams)) {
+                if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
             }
         }
         return url;
@@ -50,9 +50,9 @@ function makeApifyBinding(token, apiV2) {
             init.body = isRaw ? body : JSON.stringify(body);
             init.headers['content-type'] = contentType ?? (isRaw ? 'application/octet-stream' : 'application/json');
         }
-        const r = await realFetch(buildUrl(path, searchParams), init);
-        if (!r.ok) throw new Error(`${method} ${path} failed: ${r.status} ${await r.text()}`);
-        return r;
+        const response = await realFetch(buildUrl(path, searchParams), init);
+        if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
+        return response;
     };
 
     const apiJson = async (...args) => (await apiCall(...args)).json();
@@ -62,7 +62,7 @@ function makeApifyBinding(token, apiV2) {
         // GET /v2/store — Apify Store search. Returns the items array directly.
         search: ({ query, limit, category }) =>
             apiData('GET', '/store', { searchParams: { search: query, limit, category } })
-                .then((d) => d.items),
+                .then((page) => page.items),
 
         getDetails: ({ actorId }) =>
             apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
@@ -115,8 +115,8 @@ function makeApifyBinding(token, apiV2) {
         // Returns the full run log as text. `limit` tails the last N characters; the Apify API
         // does not paginate logs, so this is a client-side slice (the full body is fetched).
         getLog: async ({ runId, limit }) => {
-            const r = await apiCall('GET', `/logs/${encodeURIComponent(runId)}`);
-            const text = await r.text();
+            const response = await apiCall('GET', `/logs/${encodeURIComponent(runId)}`);
+            const text = await response.text();
             return limit && text.length > limit ? text.slice(-limit) : text;
         },
     };
@@ -127,7 +127,7 @@ function makeApifyBinding(token, apiV2) {
         // (eventually consistent), so we don't surface a `total`. Use `getSchema` if you
         // need an item count, or iterate to consume the whole dataset.
         listItems: async ({ datasetId, fields, omit, limit, offset, clean, desc }) => {
-            const r = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
+            const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
                 searchParams: {
                     fields: fields?.join(','),
                     omit: omit?.join(','),
@@ -137,7 +137,7 @@ function makeApifyBinding(token, apiV2) {
                     desc: desc ? '1' : undefined,
                 },
             });
-            return r.json();
+            return response.json();
         },
 
         // Async generator over the entire dataset. Pages internally in `batchSize` chunks
@@ -203,34 +203,34 @@ function makeApifyBinding(token, apiV2) {
         // Returns null when the key does not exist (404), not an error — this matches the common
         // "lookup or default" pattern in code.
         get: async ({ storeId, key }) => {
-            const r = await realFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
+            const response = await realFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
                 headers: baseHeaders,
             });
-            if (r.status === 404) return null;
-            if (!r.ok) throw new Error(`GET kvs.get failed: ${r.status} ${await r.text()}`);
-            const ct = r.headers.get('content-type') ?? '';
-            if (ct.includes('application/json')) return r.json();
-            if (ct.startsWith('text/')) return r.text();
-            return new Uint8Array(await r.arrayBuffer());
+            if (response.status === 404) return null;
+            if (!response.ok) throw new Error(`GET kvs.get failed: ${response.status} ${await response.text()}`);
+            const contentType = response.headers.get('content-type') ?? '';
+            if (contentType.includes('application/json')) return response.json();
+            if (contentType.startsWith('text/')) return response.text();
+            return new Uint8Array(await response.arrayBuffer());
         },
 
         // `value`: object → application/json; string → text/plain; Uint8Array/ArrayBuffer →
         // application/octet-stream (or whatever the caller passed via `contentType`).
         set: async ({ storeId, key, value, contentType }) => {
             let body;
-            let ct = contentType;
+            let resolvedContentType = contentType;
             if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
                 body = value;
-                ct = ct ?? 'application/octet-stream';
+                resolvedContentType = resolvedContentType ?? 'application/octet-stream';
             } else if (typeof value === 'string') {
                 body = value;
-                ct = ct ?? 'text/plain; charset=utf-8';
+                resolvedContentType = resolvedContentType ?? 'text/plain; charset=utf-8';
             } else {
                 body = JSON.stringify(value);
-                ct = ct ?? 'application/json; charset=utf-8';
+                resolvedContentType = resolvedContentType ?? 'application/json; charset=utf-8';
             }
             await apiCall('PUT', `/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`, {
-                body, contentType: ct,
+                body, contentType: resolvedContentType,
             });
         },
 
@@ -250,12 +250,12 @@ function makeApifyBinding(token, apiV2) {
 async function pushOutput(apiV2, token, env, item) {
     const datasetId = env.DEFAULT_DATASET_ID || env.DEFAULT_DATASET_ID_LEGACY;
     if (!datasetId) throw new Error('Default dataset ID missing from Actor run environment.');
-    const r = await realFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
+    const response = await realFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify(item),
     });
-    if (!r.ok) throw new Error(`Failed to push dataset item: ${r.status} ${await r.text()}`);
+    if (!response.ok) throw new Error(`Failed to push dataset item: ${response.status} ${await response.text()}`);
 }
 
 export default {

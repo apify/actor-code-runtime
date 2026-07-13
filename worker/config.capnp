@@ -9,10 +9,12 @@ const config :Workerd.Config = (
         # the hostname allowlist is enforced by guard.js, not here.
         (name = "internet", network = (allow = ["public", "private", "local"], tlsOptions = (trustBrowserCas = true))),
     ],
+    # __PORT__ is substituted by entrypoint.sh from its own $PORT before workerd
+    # starts — single source of truth, see entrypoint.sh.
     sockets = [
         (
             name = "http",
-            address = "127.0.0.1:8787",
+            address = "127.0.0.1:__PORT__",
             http = (),
             service = "main",
         ),

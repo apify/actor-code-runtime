@@ -35,6 +35,9 @@ fi
     printf '\n}\n'
 } > /app/worker/usercode.js
 
+# config.capnp hardcodes __PORT__ as a placeholder so the port has one source ($PORT above).
+sed -i "s/__PORT__/${PORT}/" /app/worker/config.capnp
+
 /usr/local/bin/workerd serve --experimental /app/worker/config.capnp &
 workerd_pid=$!
 trap 'kill "$workerd_pid" 2>/dev/null || true' EXIT
