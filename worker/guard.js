@@ -45,7 +45,9 @@ function requestUrl(input) {
     return String(input);
 }
 
-globalThis.fetch = (input, init) => {
+// Parses and validates one URL against the allowlist. Returns the parsed URL
+// (callers use it to resolve a relative redirect Location) or throws.
+function validateUrl(input) {
     let url;
     try {
         // Parse to the real host — defeats userinfo (`apify.com@evil.com`),
@@ -60,8 +62,48 @@ globalThis.fetch = (input, init) => {
     if (!isAllowedHost(url.hostname)) {
         throw new Error(`Blocked fetch to "${url.hostname}": only apify.com and its subdomains are allowed`);
     }
-    return realFetch(input, init);
-};
+    return url;
+}
+
+// fetch() follows redirects internally by default, invisibly to a wrapper that
+// only checks the initial URL — an allowlisted host could 302 to anywhere.
+// Follow redirects ourselves, one hop at a time, and re-validate each Location
+// against the allowlist before following it. Status-to-method mapping matches
+// the WHATWG fetch spec: 303 always downgrades to GET; 301/302 downgrade to
+// GET only when the original method was POST; 307/308 preserve method + body.
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECT_HOPS = 5;
+
+function nextRedirectInit(init, status) {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const downgradeToGet = status === 303 || ((status === 301 || status === 302) && method === 'POST');
+    if (!downgradeToGet) return init;
+    return { ...init, method: 'GET', body: undefined };
+}
+
+async function guardedFetch(input, init, hop = 0) {
+    if (hop > MAX_REDIRECT_HOPS) {
+        throw new Error(`Blocked fetch: exceeded ${MAX_REDIRECT_HOPS} redirects`);
+    }
+    const url = validateUrl(input);
+    const response = await realFetch(input, { ...init, redirect: 'manual' });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+    const location = response.headers.get('location');
+    if (!location) return response; // redirect status with no Location: nothing to follow
+    const nextUrl = new URL(location, url); // resolves a relative Location against the current URL
+    return guardedFetch(nextUrl.href, nextRedirectInit(init, response.status), hop + 1);
+}
+
+// writable:false + configurable:false, matching blockGlobal() below — a plain
+// assignment could be overwritten or deleted by the sandboxed script to
+// recover the ambient (real, unrestricted) fetch reference some engines
+// expose under a different name; locking it closes that off.
+Object.defineProperty(globalThis, 'fetch', {
+    value: (input, init) => guardedFetch(input, init),
+    writable: false,
+    configurable: false,
+    enumerable: true,
+});
 
 // Remove the non-fetch egress primitives. These are web-standard globals present
 // even without nodejs_compat, and they connect directly (not through the fetch
