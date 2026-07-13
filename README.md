@@ -6,8 +6,9 @@
 
 ## What it does
 
-This Actor executes TypeScript/JavaScript that an AI agent submits through the
-Apify MCP Server's **Code Mode**, then returns whatever the script printed.
+This Actor executes JavaScript that an AI agent submits through the Apify MCP
+Server's **Code Mode**, then returns whatever the script printed. JS only —
+nothing transpiles it, so a TypeScript type annotation is a SyntaxError at load.
 
 Code Mode exists so an agent can do many Apify operations in **one go** —
 search the Store, run an Actor, read its dataset, filter and aggregate the
@@ -51,7 +52,7 @@ For full configuration options, use the configurator at
 
 | Field | Type | Description |
 |---|---|---|
-| `code` | string | The TypeScript/JavaScript script to run. It receives the `apify` binding and `console`. |
+| `code` | string | The JavaScript script to run (JS only, not transpiled). It receives the `apify` binding and `console`. |
 
 ## Output
 
