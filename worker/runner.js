@@ -91,7 +91,7 @@ function makeApifyBinding(token, apiV2) {
             apiData('GET', '/store', { searchParams: { search: query, limit, category } })
                 .then((page) => page.items),
 
-        getDetails: ({ actorId }) =>
+        get: ({ actorId }) =>
             apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
 
         // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether

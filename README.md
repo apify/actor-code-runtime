@@ -87,7 +87,7 @@ Every method takes one options object and returns parsed JSON
 ```js
 // Actors
 apify.actor.search({ query, limit?, category? })            // → actors[]
-apify.actor.getDetails({ actorId })                         // → actor
+apify.actor.get({ actorId })                                  // → actor
 apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
 apify.actor.run({ actorId, ...startOpts, waitForFinishSecs = 60 })            // → run (waits)
 apify.actor.runAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }

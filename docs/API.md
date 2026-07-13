@@ -49,7 +49,7 @@ const actors = await apify.actor.search({ query: 'web scraper', limit: 5 });
 console.log(actors.map((a) => `${a.username}/${a.name}`).join('\n'));
 ```
 
-### `actor.getDetails({ actorId })` → `Actor`
+### `actor.get({ actorId })` → `Actor`
 
 Fetch the full record for one Actor.
 
