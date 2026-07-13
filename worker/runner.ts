@@ -16,22 +16,172 @@ import { run } from './usercode.js';
 
 // Must run before usercode.js's `run()` is ever invoked (it does, here — module
 // evaluation order puts this ahead of any dynamic import from inside `run()`).
-const realFetch = claimRealFetch();
-if (!realFetch) throw new Error('realFetch already claimed — guard.js imported out of order.');
+// Factored into a function (rather than a bare `const` + `if (!x) throw`) so the
+// non-null guarantee is encoded in the return type once, here — TS doesn't carry
+// a narrowed-from-null check across the later function declarations that close
+// over `realFetch`, but a return type with the `null` branch already thrown away
+// needs no further narrowing anywhere downstream.
+function requireRealFetch(): typeof globalThis.fetch {
+    const fetchFn = claimRealFetch();
+    if (!fetchFn) throw new Error('realFetch already claimed — guard.js imported out of order.');
+    return fetchFn;
+}
+const realFetch = requireRealFetch();
 
 const DEFAULT_ITERATE_BATCH = 1000;
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
 
-function stringify(x) {
+// --- Types ---------------------------------------------------------------
+// The Apify API returns many more fields per record than this code reads. Rather
+// than inventing a full schema we don't have, ApifyRecord asserts nothing beyond
+// "a JSON object" and each specific shape below only names the fields this code
+// actually consumes.
+
+interface ApifyRecord {
+    [key: string]: unknown;
+}
+
+interface RunRecord extends ApifyRecord {
+    id: string;
+}
+
+type SearchParamValue = string | number | boolean | undefined | null;
+type SearchParams = Record<string, SearchParamValue>;
+
+interface ApiCallOptions {
+    searchParams?: SearchParams;
+    body?: unknown;
+    contentType?: string;
+}
+
+interface SearchOptions {
+    query: string;
+    limit?: number;
+    category?: string;
+}
+
+interface ActorIdOptions {
+    actorId: string;
+}
+
+interface StartOptions {
+    actorId: string;
+    input?: unknown;
+    memoryMbytes?: number;
+    timeoutSecs?: number;
+    waitForFinishSecs?: number;
+    maxTotalChargeUsd?: number;
+    maxItems?: number;
+}
+
+interface RunAndGetItemsOptions extends StartOptions {
+    fields?: string[];
+    limit?: number;
+}
+
+interface RunIdOptions {
+    runId: string;
+}
+
+interface WaitOptions extends RunIdOptions {
+    waitForFinishSecs?: number;
+}
+
+interface GetLogOptions extends RunIdOptions {
+    limit?: number;
+}
+
+interface DatasetListOptions {
+    datasetId: string;
+    fields?: string[];
+    omit?: string[];
+    limit?: number;
+    offset?: number;
+    clean?: boolean;
+    desc?: boolean;
+}
+
+interface DatasetIterateOptions extends Omit<DatasetListOptions, 'offset'> {
+    batchSize?: number;
+}
+
+interface DatasetSchemaOptions {
+    datasetId: string;
+    sample?: number;
+}
+
+interface DatasetSchema {
+    itemCount: unknown;
+    sampleSize: number;
+    fields: { name: string; types: string[]; nullable: boolean }[];
+}
+
+interface CreateOptions {
+    name?: string;
+}
+
+interface PushItemsOptions {
+    datasetId: string;
+    items: unknown[];
+}
+
+interface KvsGetOptions {
+    storeId: string;
+    key: string;
+}
+
+interface KvsSetOptions extends KvsGetOptions {
+    value: unknown;
+    contentType?: string;
+}
+
+interface KvsListOptions {
+    storeId: string;
+    limit?: number;
+    exclusiveStartKey?: string;
+}
+
+interface ConsoleLike {
+    log: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    info: (...args: unknown[]) => void;
+}
+
+interface Env {
+    APIFY_TOKEN?: string;
+    DEFAULT_DATASET_ID?: string;
+    DEFAULT_DATASET_ID_LEGACY?: string;
+    API_BASE_URL?: string;
+}
+
+interface OutputItem {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    statusMessage: string;
+}
+
+// ---------------------------------------------------------------------------
+
+function stringify(x: unknown): string {
     if (typeof x === 'string') return x;
     try { return JSON.stringify(x); } catch { return String(x); }
 }
 
-function makeApifyBinding(token, apiV2) {
-    const baseHeaders = { Authorization: `Bearer ${token}` };
+function errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
+function errorDetail(err: unknown): string {
+    return err instanceof Error && err.stack ? err.stack : errorMessage(err);
+}
+
+function makeApifyBinding(token: string, apiV2: string) {
+    const baseHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
 
     // Build a URL with optional query params; null/undefined values are dropped.
-    const buildUrl = (path, searchParams) => {
+    const buildUrl = (path: string, searchParams?: SearchParams): URL => {
         const url = new URL(`${apiV2}${path}`);
         if (searchParams) {
             for (const [key, value] of Object.entries(searchParams)) {
@@ -43,26 +193,40 @@ function makeApifyBinding(token, apiV2) {
 
     // Single-source HTTP wrapper. Throws on non-2xx with the response body in the message.
     // `body`: string / Uint8Array passed through; objects are JSON.stringify'd.
-    const apiCall = async (method, path, { searchParams, body, contentType } = {}) => {
-        const init = { method, headers: { ...baseHeaders } };
+    const apiCall = async (method: string, path: string, options: ApiCallOptions = {}): Promise<Response> => {
+        const { searchParams, body, contentType } = options;
+        const headers: Record<string, string> = { ...baseHeaders };
+        let requestBody: BodyInit | undefined;
         if (body !== undefined) {
-            const isRaw = typeof body === 'string' || body instanceof Uint8Array || body instanceof ArrayBuffer;
-            init.body = isRaw ? body : JSON.stringify(body);
-            init.headers['content-type'] = contentType ?? (isRaw ? 'application/octet-stream' : 'application/json');
+            if (typeof body === 'string' || body instanceof Uint8Array || body instanceof ArrayBuffer) {
+                // Cast: this TS/DOM-lib pairing types Uint8Array generically over its buffer,
+                // which doesn't structurally match BodyInit here even though it's a valid
+                // fetch body at runtime (an ArrayBufferView).
+                requestBody = body as BodyInit;
+                headers['content-type'] = contentType ?? 'application/octet-stream';
+            } else {
+                requestBody = JSON.stringify(body);
+                headers['content-type'] = contentType ?? 'application/json';
+            }
         }
-        const response = await realFetch(buildUrl(path, searchParams), init);
+        const response = await realFetch(buildUrl(path, searchParams), { method, headers, body: requestBody });
         if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
         return response;
     };
 
-    const apiJson = async (...args) => (await apiCall(...args)).json();
-    const apiData = async (...args) => (await apiJson(...args)).data;
+    // The Apify API's JSON envelope (`{ data: ... }`) carries whatever shape the endpoint
+    // returns; there's no schema to check it against here, so this stays honestly `any`
+    // rather than asserting a shape we haven't verified.
+    const apiJson = async (method: string, path: string, options?: ApiCallOptions): Promise<any> =>
+        (await apiCall(method, path, options)).json();
+    const apiData = async (method: string, path: string, options?: ApiCallOptions): Promise<any> =>
+        (await apiJson(method, path, options)).data;
 
     // Run IDs this script itself started, via actor.run() / actor.start() (and transitively
     // actor.runAndGetItems(), which calls actor.run()). run.abort() below is scoped to this
     // set — a script can only abort runs it started, not any account-wide runId it's handed
     // or guesses.
-    const startedRunIds = new Set();
+    const startedRunIds = new Set<string>();
 
     // POST /acts/:id/runs, shared by actor.run() (start+wait, waitForFinishSecs defaults to 60,
     // capped at 60s per the Apify API — for longer runs use start() + apify.run.wait()) and
@@ -70,7 +234,7 @@ function makeApifyBinding(token, apiV2) {
     // defaultDatasetId / defaultKeyValueStoreId. Intentionally does NOT use /run-sync, which
     // returns the OUTPUT KVS record (a pattern only some Actors follow) rather than the
     // structured run record.
-    const createRun = ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }) =>
+    const createRun = ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }: StartOptions): Promise<RunRecord> =>
         apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
             searchParams: {
                 waitForFinish: waitForFinishSecs,
@@ -80,37 +244,47 @@ function makeApifyBinding(token, apiV2) {
                 maxItems,
             },
             body: input ?? {},
-        }).then((runRecord) => {
+        }).then((runRecord: RunRecord) => {
             startedRunIds.add(runRecord.id);
             return runRecord;
         });
 
     const actor = {
         // GET /v2/store — Apify Store search. Returns the items array directly.
-        search: ({ query, limit, category }) =>
+        search: ({ query, limit, category }: SearchOptions): Promise<ApifyRecord[]> =>
             apiData('GET', '/store', { searchParams: { search: query, limit, category } })
-                .then((page) => page.items),
+                .then((page: { items: ApifyRecord[] }) => page.items),
 
-        get: ({ actorId }) =>
+        get: ({ actorId }: ActorIdOptions): Promise<ApifyRecord> =>
             apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
 
         // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
         // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
         // can be scoped to runs this script itself started (see the run.abort definition below).
-        run: (opts) => createRun({ waitForFinishSecs: 60, ...opts }),
+        run: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: 60, ...opts }),
 
         // Async kickoff. Returns immediately with a run record in READY/RUNNING state.
-        start: (opts) => createRun(opts),
-        // runAndGetItems is added below once `dataset.listItems` is defined.
+        start: (opts: StartOptions): Promise<RunRecord> => createRun(opts),
+
+        // Runs an Actor (same as run(), waitForFinishSecs defaults to 60) and returns its
+        // dataset items in one call. Calls createRun() directly rather than through
+        // `actor.run()` — same underlying request, no self-reference to `actor` needed.
+        runAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
+            const runRecord = await createRun({ actorId, input, waitForFinishSecs: 60, ...runOpts });
+            const items = await dataset.listItems({
+                datasetId: runRecord.defaultDatasetId as string, fields, limit,
+            });
+            return { run: runRecord, items };
+        },
     };
 
     const run = {
-        get: ({ runId }) =>
+        get: ({ runId }: RunIdOptions): Promise<RunRecord> =>
             apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`),
 
         // Block until the run terminates or `waitForFinishSecs` elapses (whichever comes first).
         // The Apify API caps this at 60s per request; longer waits require a polling loop.
-        wait: ({ runId, waitForFinishSecs = 60 }) =>
+        wait: ({ runId, waitForFinishSecs = 60 }: WaitOptions): Promise<RunRecord> =>
             apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
             }),
@@ -118,7 +292,7 @@ function makeApifyBinding(token, apiV2) {
         // Scoped to runs this script itself started (see startedRunIds above) — without this,
         // any runId a script is handed (e.g. read from a dataset item, or guessed) could abort
         // an unrelated, account-wide run.
-        abort: ({ runId }) => {
+        abort: ({ runId }: RunIdOptions): Promise<RunRecord> => {
             if (!startedRunIds.has(runId)) {
                 throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
             }
@@ -127,7 +301,7 @@ function makeApifyBinding(token, apiV2) {
 
         // Returns the full run log as text. `limit` tails the last N characters; the Apify API
         // does not paginate logs, so this is a client-side slice (the full body is fetched).
-        getLog: async ({ runId, limit }) => {
+        getLog: async ({ runId, limit }: GetLogOptions): Promise<string> => {
             const response = await apiCall('GET', `/logs/${encodeURIComponent(runId)}`);
             const text = await response.text();
             return limit && text.length > limit ? text.slice(-limit) : text;
@@ -139,7 +313,7 @@ function makeApifyBinding(token, apiV2) {
         // `x-apify-pagination-total` header is unreliable for freshly-created datasets
         // (eventually consistent), so we don't surface a `total`. Use `getSchema` if you
         // need an item count, or iterate to consume the whole dataset.
-        listItems: async ({ datasetId, fields, omit, limit, offset, clean, desc }) => {
+        listItems: async ({ datasetId, fields, omit, limit, offset, clean, desc }: DatasetListOptions): Promise<ApifyRecord[]> => {
             const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
                 searchParams: {
                     fields: fields?.join(','),
@@ -157,7 +331,7 @@ function makeApifyBinding(token, apiV2) {
         // so the user can `for await (const item of apify.dataset.iterate({...}))` without
         // worrying about offsets. Stops when a page returns fewer items than `batchSize`
         // (the natural end-of-data signal — pagination total is not used, see listItems).
-        iterate: async function* ({ datasetId, fields, omit, clean, desc, batchSize = DEFAULT_ITERATE_BATCH }) {
+        iterate: async function* ({ datasetId, fields, omit, clean, desc, batchSize = DEFAULT_ITERATE_BATCH }: DatasetIterateOptions): AsyncGenerator<ApifyRecord> {
             let offset = 0;
             while (true) {
                 const items = await dataset.listItems({
@@ -172,16 +346,15 @@ function makeApifyBinding(token, apiV2) {
         },
 
         // Apify has no dedicated schema endpoint; we infer one from a small sample of items.
-        // Returns { itemCount, sampleSize, fields: [{ name, types, nullable }] }.
-        getSchema: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }) => {
+        getSchema: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
             const meta = await apiData('GET', `/datasets/${encodeURIComponent(datasetId)}`);
             const items = await dataset.listItems({ datasetId, limit: sample });
-            const fields = new Map();
+            const fields = new Map<string, Set<string>>();
             for (const item of items) {
                 for (const [name, value] of Object.entries(item ?? {})) {
                     const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
                     if (!fields.has(name)) fields.set(name, new Set());
-                    fields.get(name).add(type);
+                    fields.get(name)!.add(type);
                 }
             }
             return {
@@ -195,27 +368,19 @@ function makeApifyBinding(token, apiV2) {
             };
         },
 
-        create: ({ name } = {}) =>
+        create: ({ name }: CreateOptions = {}): Promise<ApifyRecord> =>
             apiData('POST', '/datasets', { searchParams: { name } }),
 
-        pushItems: async ({ datasetId, items }) => {
+        pushItems: async ({ datasetId, items }: PushItemsOptions): Promise<void> => {
             await apiCall('POST', `/datasets/${encodeURIComponent(datasetId)}/items`, { body: items });
         },
-    };
-
-    actor.runAndGetItems = async ({ actorId, input, fields, limit, ...runOpts }) => {
-        const runRecord = await actor.run({ actorId, input, ...runOpts });
-        const items = await dataset.listItems({
-            datasetId: runRecord.defaultDatasetId, fields, limit,
-        });
-        return { run: runRecord, items };
     };
 
     const kvs = {
         // Returns the value directly (parsed when JSON, string when text/*, Uint8Array otherwise).
         // Returns null when the key does not exist (404), not an error — this matches the common
         // "lookup or default" pattern in code.
-        get: async ({ storeId, key }) => {
+        get: async ({ storeId, key }: KvsGetOptions): Promise<unknown> => {
             const response = await realFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
                 headers: baseHeaders,
             });
@@ -229,11 +394,12 @@ function makeApifyBinding(token, apiV2) {
 
         // `value`: object → application/json; string → text/plain; Uint8Array/ArrayBuffer →
         // application/octet-stream (or whatever the caller passed via `contentType`).
-        set: async ({ storeId, key, value, contentType }) => {
-            let body;
+        set: async ({ storeId, key, value, contentType }: KvsSetOptions): Promise<void> => {
+            let body: BodyInit;
             let resolvedContentType = contentType;
             if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
-                body = value;
+                // Cast: see the equivalent Uint8Array-vs-BodyInit comment in apiCall() above.
+                body = value as BodyInit;
                 resolvedContentType = resolvedContentType ?? 'application/octet-stream';
             } else if (typeof value === 'string') {
                 body = value;
@@ -247,12 +413,12 @@ function makeApifyBinding(token, apiV2) {
             });
         },
 
-        list: ({ storeId, limit, exclusiveStartKey }) =>
+        list: ({ storeId, limit, exclusiveStartKey }: KvsListOptions): Promise<ApifyRecord> =>
             apiData('GET', `/key-value-stores/${encodeURIComponent(storeId)}/keys`, {
                 searchParams: { limit, exclusiveStartKey },
             }),
 
-        create: ({ name } = {}) =>
+        create: ({ name }: CreateOptions = {}): Promise<ApifyRecord> =>
             apiData('POST', '/key-value-stores', { searchParams: { name } }),
     };
 
@@ -267,7 +433,7 @@ function makeApifyBinding(token, apiV2) {
 }
 
 // Push the captured streams as a single item to the run's default dataset.
-async function pushOutput(apiV2, token, env, item) {
+async function pushOutput(apiV2: string, token: string, env: Env, item: OutputItem): Promise<void> {
     const datasetId = env.DEFAULT_DATASET_ID || env.DEFAULT_DATASET_ID_LEGACY;
     if (!datasetId) throw new Error('Default dataset ID missing from Actor run environment.');
     const response = await realFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
@@ -279,7 +445,7 @@ async function pushOutput(apiV2, token, env, item) {
 }
 
 export default {
-    async fetch(request, env) {
+    async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
         if (url.pathname === '/health') return new Response('ok');
         if (url.pathname !== '/run') return new Response('Not found', { status: 404 });
@@ -289,14 +455,14 @@ export default {
         // APIFY_API_BASE_URL is the platform-internal API (may have a trailing slash).
         const apiV2 = `${(env.API_BASE_URL || 'https://api.apify.com').replace(/\/+$/, '')}/v2`;
 
-        const stdout = [];
-        const stderr = [];
+        const stdout: string[] = [];
+        const stderr: string[] = [];
         // Frozen so the script can't reassign e.g. console.log to corrupt its own capture.
-        const captureConsole = Object.freeze({
-            log:   (...args) => stdout.push(args.map(stringify).join(' ')),
-            error: (...args) => stderr.push(args.map(stringify).join(' ')),
-            warn:  (...args) => stderr.push(args.map(stringify).join(' ')),
-            info:  (...args) => stdout.push(args.map(stringify).join(' ')),
+        const captureConsole: ConsoleLike = Object.freeze({
+            log:   (...args: unknown[]) => stdout.push(args.map(stringify).join(' ')),
+            error: (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),
+            warn:  (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),
+            info:  (...args: unknown[]) => stdout.push(args.map(stringify).join(' ')),
         });
 
         // A thrown program is a user-level failure: capture it in stderr and still
@@ -316,10 +482,9 @@ export default {
         try {
             await run(makeApifyBinding(token, apiV2), captureConsole);
         } catch (err) {
-            const message = err?.message ?? String(err);
-            stderr.push(err?.stack ?? message);
+            stderr.push(errorDetail(err));
             exitCode = 1;
-            statusMessage = `Script threw: ${message}`;
+            statusMessage = `Script threw: ${errorMessage(err)}`;
         }
 
         await pushOutput(apiV2, token, env, {

@@ -23,8 +23,8 @@ const realFetch = globalThis.fetch.bind(globalThis);
 // try to recover the unrestricted fetch, it gets this same cached instance —
 // but the value is already gone. A standing `export { realFetch }` would hand
 // it to that later import too; don't reintroduce one.
-let unclaimedRealFetch = realFetch;
-export function claimRealFetch() {
+let unclaimedRealFetch: typeof realFetch | null = realFetch;
+export function claimRealFetch(): typeof realFetch | null {
     const fetchFn = unclaimedRealFetch;
     unclaimedRealFetch = null;
     return fetchFn;
@@ -33,12 +33,12 @@ export function claimRealFetch() {
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
 // (ends with `.evil.com`) both fail.
-function isAllowedHost(hostname) {
+function isAllowedHost(hostname: string): boolean {
     const host = hostname.toLowerCase().replace(/\.$/, ''); // strip FQDN trailing dot
     return host === 'apify.com' || host.endsWith('.apify.com');
 }
 
-function requestUrl(input) {
+function requestUrl(input: RequestInfo | URL): string {
     if (typeof input === 'string') return input;
     if (input instanceof URL) return input.href;
     if (input && typeof input.url === 'string') return input.url; // Request
@@ -47,8 +47,8 @@ function requestUrl(input) {
 
 // Parses and validates one URL against the allowlist. Returns the parsed URL
 // (callers use it to resolve a relative redirect Location) or throws.
-function validateUrl(input) {
-    let url;
+function validateUrl(input: RequestInfo | URL): URL {
+    let url: URL;
     try {
         // Parse to the real host — defeats userinfo (`apify.com@evil.com`),
         // path/query/fragment (`evil.com/apify.com`) and similar tricks.
@@ -74,14 +74,14 @@ function validateUrl(input) {
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECT_HOPS = 5;
 
-function nextRedirectInit(init, status) {
+function nextRedirectInit(init: RequestInit | undefined, status: number): RequestInit | undefined {
     const method = (init?.method ?? 'GET').toUpperCase();
     const downgradeToGet = status === 303 || ((status === 301 || status === 302) && method === 'POST');
     if (!downgradeToGet) return init;
     return { ...init, method: 'GET', body: undefined };
 }
 
-async function guardedFetch(input, init, hop = 0) {
+async function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined, hop = 0): Promise<Response> {
     if (hop > MAX_REDIRECT_HOPS) {
         throw new Error(`Blocked fetch: exceeded ${MAX_REDIRECT_HOPS} redirects`);
     }
@@ -99,7 +99,7 @@ async function guardedFetch(input, init, hop = 0) {
 // recover the ambient (real, unrestricted) fetch reference some engines
 // expose under a different name; locking it closes that off.
 Object.defineProperty(globalThis, 'fetch', {
-    value: (input, init) => guardedFetch(input, init),
+    value: (input: RequestInfo | URL, init?: RequestInit) => guardedFetch(input, init),
     writable: false,
     configurable: false,
     enumerable: true,
@@ -109,7 +109,7 @@ Object.defineProperty(globalThis, 'fetch', {
 // even without nodejs_compat, and they connect directly (not through the fetch
 // guard), so a script could otherwise open a wss:// or SSE connection to any
 // public host and exfiltrate data around the *.apify.com allowlist.
-function blockGlobal(name) {
+function blockGlobal(name: string): void {
     const blocked = function () {
         throw new Error(`Blocked ${name}: only fetch() to apify.com and its subdomains is allowed`);
     };
