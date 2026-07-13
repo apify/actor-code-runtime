@@ -1,8 +1,8 @@
 // Single worker for the per-run code-runtime Actor. It runs the user's program
 // (imported from the generated `usercode.js` module) with the `apify` REST
-// binding and a captured `console`, then pushes `{ stdout, stderr }` to the
-// run's default dataset. The container entrypoint generates `usercode.js`,
-// boots workerd, and triggers `/run` once.
+// binding and a captured `console`, then pushes `{ stdout, stderr, exitCode,
+// statusMessage }` to the run's default dataset. The container entrypoint
+// generates `usercode.js`, boots workerd, and triggers `/run` once.
 //
 // Single-tenant: one run = one container = one program = one token. No Worker
 // Loader / per-request isolate is needed — the program runs in this worker,
@@ -58,6 +58,33 @@ function makeApifyBinding(token, apiV2) {
     const apiJson = async (...args) => (await apiCall(...args)).json();
     const apiData = async (...args) => (await apiJson(...args)).data;
 
+    // Run IDs this script itself started, via actor.run() / actor.start() (and transitively
+    // actor.runAndGetItems(), which calls actor.run()). run.abort() below is scoped to this
+    // set — a script can only abort runs it started, not any account-wide runId it's handed
+    // or guesses.
+    const startedRunIds = new Set();
+
+    // POST /acts/:id/runs, shared by actor.run() (start+wait, waitForFinishSecs defaults to 60,
+    // capped at 60s per the Apify API — for longer runs use start() + apify.run.wait()) and
+    // actor.start() (async kickoff, no wait). Returns the run record so the caller can read
+    // defaultDatasetId / defaultKeyValueStoreId. Intentionally does NOT use /run-sync, which
+    // returns the OUTPUT KVS record (a pattern only some Actors follow) rather than the
+    // structured run record.
+    const createRun = ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }) =>
+        apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
+            searchParams: {
+                waitForFinish: waitForFinishSecs,
+                memory: memoryMbytes,
+                timeout: timeoutSecs,
+                maxTotalChargeUsd,
+                maxItems,
+            },
+            body: input ?? {},
+        }).then((runRecord) => {
+            startedRunIds.add(runRecord.id);
+            return runRecord;
+        });
+
     const actor = {
         // GET /v2/store — Apify Store search. Returns the items array directly.
         search: ({ query, limit, category }) =>
@@ -67,34 +94,13 @@ function makeApifyBinding(token, apiV2) {
         getDetails: ({ actorId }) =>
             apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
 
-        // POST /runs with waitForFinish blocks until the run completes (max 60s per the
-        // Apify API; for longer runs the caller should use start() + apify.run.wait()).
-        // Returns the run record so the caller can read defaultDatasetId / defaultKeyValueStoreId.
-        // Intentionally does NOT use /run-sync, which returns the OUTPUT KVS record (a pattern
-        // only some Actors follow) rather than the structured run record.
-        run: ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs = 60, maxTotalChargeUsd, maxItems }) =>
-            apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
-                searchParams: {
-                    waitForFinish: waitForFinishSecs,
-                    memory: memoryMbytes,
-                    timeout: timeoutSecs,
-                    maxTotalChargeUsd,
-                    maxItems,
-                },
-                body: input ?? {},
-            }),
+        // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
+        // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
+        // can be scoped to runs this script itself started (see the run.abort definition below).
+        run: (opts) => createRun({ waitForFinishSecs: 60, ...opts }),
 
         // Async kickoff. Returns immediately with a run record in READY/RUNNING state.
-        start: ({ actorId, input, memoryMbytes, timeoutSecs, maxTotalChargeUsd, maxItems }) =>
-            apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
-                searchParams: {
-                    memory: memoryMbytes,
-                    timeout: timeoutSecs,
-                    maxTotalChargeUsd,
-                    maxItems,
-                },
-                body: input ?? {},
-            }),
+        start: (opts) => createRun(opts),
         // runAndGetItems is added below once `dataset.listItems` is defined.
     };
 
@@ -109,8 +115,15 @@ function makeApifyBinding(token, apiV2) {
                 searchParams: { waitForFinish: waitForFinishSecs },
             }),
 
-        abort: ({ runId }) =>
-            apiData('POST', `/actor-runs/${encodeURIComponent(runId)}/abort`),
+        // Scoped to runs this script itself started (see startedRunIds above) — without this,
+        // any runId a script is handed (e.g. read from a dataset item, or guessed) could abort
+        // an unrelated, account-wide run.
+        abort: ({ runId }) => {
+            if (!startedRunIds.has(runId)) {
+                throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
+            }
+            return apiData('POST', `/actor-runs/${encodeURIComponent(runId)}/abort`);
+        },
 
         // Returns the full run log as text. `limit` tails the last N characters; the Apify API
         // does not paginate logs, so this is a client-side slice (the full body is fetched).
@@ -243,7 +256,14 @@ function makeApifyBinding(token, apiV2) {
             apiData('POST', '/key-value-stores', { searchParams: { name } }),
     };
 
-    return { actor, run, dataset, kvs };
+    // Freeze every namespace (and the wrapper) so the script can't reassign a method to
+    // corrupt its own behavior or, for `console` below, its own output capture.
+    return Object.freeze({
+        actor: Object.freeze(actor),
+        run: Object.freeze(run),
+        dataset: Object.freeze(dataset),
+        kvs: Object.freeze(kvs),
+    });
 }
 
 // Push the captured streams as a single item to the run's default dataset.
@@ -271,12 +291,13 @@ export default {
 
         const stdout = [];
         const stderr = [];
-        const captureConsole = {
+        // Frozen so the script can't reassign e.g. console.log to corrupt its own capture.
+        const captureConsole = Object.freeze({
             log:   (...args) => stdout.push(args.map(stringify).join(' ')),
             error: (...args) => stderr.push(args.map(stringify).join(' ')),
             warn:  (...args) => stderr.push(args.map(stringify).join(' ')),
             info:  (...args) => stdout.push(args.map(stringify).join(' ')),
-        };
+        });
 
         // A thrown program is a user-level failure: capture it in stderr and still
         // push the output, so the run SUCCEEDS with diagnostics. Infra failures
@@ -286,15 +307,27 @@ export default {
         // status: 0 when the script returns normally, 1 when it throws. The run itself
         // still SUCCEEDS on a throw, so callers detect a failed script via this field
         // rather than heuristics on stderr (console.error is a legitimate log channel).
+        // statusMessage carries the same signal in prose, for callers that don't want to
+        // branch on exitCode. A script that fails to *compile* never reaches this handler at
+        // all (workerd fails the whole run before any request arrives) — entrypoint.sh
+        // handles that case directly, see its statusMessage "Failed to compile: ...".
         let exitCode = 0;
+        let statusMessage = 'Script completed';
         try {
             await run(makeApifyBinding(token, apiV2), captureConsole);
         } catch (err) {
-            stderr.push(err?.stack ?? err?.message ?? String(err));
+            const message = err?.message ?? String(err);
+            stderr.push(err?.stack ?? message);
             exitCode = 1;
+            statusMessage = `Script threw: ${message}`;
         }
 
-        await pushOutput(apiV2, token, env, { stdout: stdout.join('\n'), stderr: stderr.join('\n'), exitCode });
+        await pushOutput(apiV2, token, env, {
+            stdout: stdout.join('\n'),
+            stderr: stderr.join('\n'),
+            exitCode,
+            statusMessage,
+        });
         return Response.json({ ok: true });
     },
 };
