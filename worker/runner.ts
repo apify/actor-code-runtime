@@ -222,15 +222,15 @@ function makeApifyBinding(token: string, apiV2: string) {
     const apiData = async (method: string, path: string, options?: ApiCallOptions): Promise<any> =>
         (await apiJson(method, path, options)).data;
 
-    // Run IDs this script itself started, via actor.run() / actor.start() (and transitively
-    // actor.runAndGetItems(), which calls actor.run()). run.abort() below is scoped to this
-    // set — a script can only abort runs it started, not any account-wide runId it's handed
-    // or guesses.
+    // Run IDs this script itself started, via actor.call() / actor.start() (and transitively
+    // actor.callAndGetItems(), which shares createRun() below). run.abort() below is scoped to
+    // this set — a script can only abort runs it started, not any account-wide runId it's
+    // handed or guesses.
     const startedRunIds = new Set<string>();
 
-    // POST /acts/:id/runs, shared by actor.run() (start+wait, waitForFinishSecs defaults to 60,
-    // capped at 60s per the Apify API — for longer runs use start() + apify.run.wait()) and
-    // actor.start() (async kickoff, no wait). Returns the run record so the caller can read
+    // POST /acts/:id/runs, shared by actor.call() (start+wait, waitForFinishSecs defaults to 60,
+    // capped at 60s per the Apify API — for longer runs use start() + apify.run.waitForFinish())
+    // and actor.start() (async kickoff, no wait). Returns the run record so the caller can read
     // defaultDatasetId / defaultKeyValueStoreId. Intentionally does NOT use /run-sync, which
     // returns the OUTPUT KVS record (a pattern only some Actors follow) rather than the
     // structured run record.
@@ -261,15 +261,15 @@ function makeApifyBinding(token: string, apiV2: string) {
         // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
         // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
         // can be scoped to runs this script itself started (see the run.abort definition below).
-        run: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: 60, ...opts }),
+        call: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: 60, ...opts }),
 
         // Async kickoff. Returns immediately with a run record in READY/RUNNING state.
         start: (opts: StartOptions): Promise<RunRecord> => createRun(opts),
 
-        // Runs an Actor (same as run(), waitForFinishSecs defaults to 60) and returns its
+        // Runs an Actor (same as call(), waitForFinishSecs defaults to 60) and returns its
         // dataset items in one call. Calls createRun() directly rather than through
-        // `actor.run()` — same underlying request, no self-reference to `actor` needed.
-        runAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
+        // `actor.call()` — same underlying request, no self-reference to `actor` needed.
+        callAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
             const runRecord = await createRun({ actorId, input, waitForFinishSecs: 60, ...runOpts });
             const items = await dataset.listItems({
                 datasetId: runRecord.defaultDatasetId as string, fields, limit,
@@ -284,7 +284,7 @@ function makeApifyBinding(token: string, apiV2: string) {
 
         // Block until the run terminates or `waitForFinishSecs` elapses (whichever comes first).
         // The Apify API caps this at 60s per request; longer waits require a polling loop.
-        wait: ({ runId, waitForFinishSecs = 60 }: WaitOptions): Promise<RunRecord> =>
+        waitForFinish: ({ runId, waitForFinishSecs = 60 }: WaitOptions): Promise<RunRecord> =>
             apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
             }),
@@ -311,7 +311,7 @@ function makeApifyBinding(token: string, apiV2: string) {
     const dataset = {
         // Returns the items array directly (no wrapper). The Apify API's
         // `x-apify-pagination-total` header is unreliable for freshly-created datasets
-        // (eventually consistent), so we don't surface a `total`. Use `getSchema` if you
+        // (eventually consistent), so we don't surface a `total`. Use `inferFields` if you
         // need an item count, or iterate to consume the whole dataset.
         listItems: async ({ datasetId, fields, omit, limit, offset, clean, desc }: DatasetListOptions): Promise<ApifyRecord[]> => {
             const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
@@ -346,7 +346,9 @@ function makeApifyBinding(token: string, apiV2: string) {
         },
 
         // Apify has no dedicated schema endpoint; we infer one from a small sample of items.
-        getSchema: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
+        // Named inferFields (not getSchema) to avoid colliding with the Actor's own *declared*
+        // dataset schema (a different concept, described in this Actor's own actor.json).
+        inferFields: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
             const meta = await apiData('GET', `/datasets/${encodeURIComponent(datasetId)}`);
             const items = await dataset.listItems({ datasetId, limit: sample });
             const fields = new Map<string, Set<string>>();
