@@ -129,6 +129,19 @@ see [Limits & failure modes](#limits--failure-modes).
 
 ## Recipes
 
+### Chain Actors (one run's output feeds the next)
+
+```js
+const { items: results } = await apify.actor.callAndGetItems({
+    actorId: 'apify/google-search-scraper', input: { queries: 'apify' }, limit: 10,
+});
+const startUrls = results.flatMap((r) => r.organicResults ?? []).map((r) => ({ url: r.url }));
+const { items: pages } = await apify.actor.callAndGetItems({
+    actorId: 'apify/website-content-crawler', input: { startUrls },
+});
+console.log(JSON.stringify(pages.slice(0, 3).map((p) => p.url)));
+```
+
 ### Bounded parallel fan-out
 
 This Actor's clearest win: run several independent Actors (or the same Actor

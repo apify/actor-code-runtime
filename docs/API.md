@@ -219,6 +219,12 @@ Append one or more items to a dataset.
 **Output:** none (resolves once the items are stored).
 **Apify API:** [`POST /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-post)
 
+```js
+const ds = await apify.dataset.create();
+await apify.dataset.pushItems({ datasetId: ds.id, items: [{ a: 1 }, { a: 2 }] });
+const items = await apify.dataset.listItems({ datasetId: ds.id });
+```
+
 ### `dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })` → `object[]`
 
 Read a page of items.
@@ -344,6 +350,13 @@ Read a record.
 Returns **`null`** when the key does not exist (404) instead of throwing, so you
 can do lookup-or-default without a `try/catch`.
 **Apify API:** [`GET /v2/key-value-stores/{storeId}/records/{key}`](https://docs.apify.com/api/v2/key-value-store-record-get)
+
+```js
+const kv = await apify.keyValueStore.create();
+await apify.keyValueStore.set({ storeId: kv.id, key: 'state', value: { seen: [] } });
+const state = await apify.keyValueStore.get({ storeId: kv.id, key: 'state' }); // → { seen: [] }
+const missing = await apify.keyValueStore.get({ storeId: kv.id, key: 'nope' }); // → null
+```
 
 ### `keyValueStore.list({ storeId, limit?, exclusiveStartKey? })` → `{ items, … }`
 
