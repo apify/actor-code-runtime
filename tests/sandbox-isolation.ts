@@ -93,12 +93,12 @@ check('EventSource blocked', blocksConstruct('EventSource', 'https://example.com
 // The apify binding must still work (fetch to *.apify.com).
 let bindingWorks = false;
 try {
-    const found = await apify.actor.search({ query: 'hello world', limit: 1 });
+    const found = await apify.store({ search: 'hello world', limit: 1 });
     bindingWorks = Array.isArray(found);
 } catch (e) {
-    console.error(`apify.actor.search threw: ${(e as Error).message}`);
+    console.error(`apify.store threw: ${(e as Error).message}`);
 }
-check('apify binding works', bindingWorks, bindingWorks ? 'actor.search ok' : 'binding broken');
+check('apify binding works', bindingWorks, bindingWorks ? 'store ok' : 'binding broken');
 
 const passed = results.filter(Boolean).length;
 console.log(`\n=== SUMMARY: ${passed}/${results.length} passed ===`);

@@ -25,8 +25,8 @@ async function check(name: string, fn: () => Promise<unknown>): Promise<void> {
 const ACTOR = 'apify/hello-world';
 
 // ---- actor (read) ----
-await check('actor.search', async () => {
-    const items = await apify.actor.search({ query: 'hello world', limit: 3 });
+await check('store', async () => {
+    const items = await apify.store({ search: 'hello world', limit: 3 });
     if (!Array.isArray(items)) throw new Error('expected array');
     return `${items.length} actors`;
 });
@@ -61,23 +61,23 @@ await check('dataset.iterate', async () => {
 
 // ---- key-value store ----
 let storeId = '';
-await check('kvs.create', async () => {
-    storeId = (await apify.kvs.create()).id as string;
+await check('keyValueStore.create', async () => {
+    storeId = (await apify.keyValueStore.create()).id as string;
     return storeId;
 });
-await check('kvs.set', async () => {
-    await apify.kvs.set({ storeId, key: 'obj', value: { hello: 'world' } });
-    await apify.kvs.set({ storeId, key: 'txt', value: 'plain' });
+await check('keyValueStore.set', async () => {
+    await apify.keyValueStore.set({ storeId, key: 'obj', value: { hello: 'world' } });
+    await apify.keyValueStore.set({ storeId, key: 'txt', value: 'plain' });
     return 'set obj + txt';
 });
-await check('kvs.get', async () => {
-    const obj = await apify.kvs.get({ storeId, key: 'obj' }) as { hello: string };
-    const txt = await apify.kvs.get({ storeId, key: 'txt' });
-    const missing = await apify.kvs.get({ storeId, key: 'nope' });
+await check('keyValueStore.get', async () => {
+    const obj = await apify.keyValueStore.get({ storeId, key: 'obj' }) as { hello: string };
+    const txt = await apify.keyValueStore.get({ storeId, key: 'txt' });
+    const missing = await apify.keyValueStore.get({ storeId, key: 'nope' });
     return `obj.hello=${obj.hello} txt=${txt} missing=${missing}`;
 });
-await check('kvs.list', async () => {
-    const l = await apify.kvs.list({ storeId }) as { items: unknown[] };
+await check('keyValueStore.list', async () => {
+    const l = await apify.keyValueStore.list({ storeId }) as { items: unknown[] };
     return `${l.items.length} keys`;
 });
 

@@ -22,21 +22,25 @@ document describes every method in detail.
   live request/response schema.
 - **Errors.** A non-2xx API response throws an `Error` whose message is
   `<METHOD> <path> failed: <status> <body>`. The one exception is
-  [`kvs.get`](#kvsget--value--null), which returns `null` for a missing key.
+  [`keyValueStore.get`](#keyvaluestoreget--value--null), which returns `null` for a missing key.
 - **Network.** Outbound `fetch` from your script is restricted to `apify.com`
   and its subdomains.
 
 ---
 
-## `apify.actor`
+## `apify.store`
 
-### `actor.search({ query, limit?, category? })` → `Actor[]`
+Apify's own API tags this endpoint `Store` — a top-level resource, not an
+Actor method — so the binding mirrors that: `apify.store(...)`, not
+`apify.actor.store(...)`.
+
+### `apify.store({ search, limit?, category? })` → `Actor[]`
 
 Search the Apify Store.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `query` | `string` | yes | Full-text search query. |
+| `search` | `string` | yes | Full-text search query. |
 | `limit` | `number` | no | Maximum number of results. |
 | `category` | `string` | no | Restrict to a Store category. |
 
@@ -45,9 +49,13 @@ is dropped) — i.e. an `Actor[]`.
 **Apify API:** [`GET /v2/store`](https://docs.apify.com/api/v2/store-get)
 
 ```js
-const actors = await apify.actor.search({ query: 'web scraper', limit: 5 });
+const actors = await apify.store({ search: 'web scraper', limit: 5 });
 console.log(actors.map((a) => `${a.username}/${a.name}`).join('\n'));
 ```
+
+---
+
+## `apify.actor`
 
 ### `actor.get({ actorId })` → `Actor`
 
@@ -285,9 +293,9 @@ Infer a lightweight schema from a sample of items (Apify has no schema endpoint)
 
 ---
 
-## `apify.kvs`
+## `apify.keyValueStore`
 
-### `kvs.create({ name? })` → `Store`
+### `keyValueStore.create({ name? })` → `KeyValueStore`
 
 Create a key-value store and return its record.
 
@@ -295,10 +303,10 @@ Create a key-value store and return its record.
 |---|---|---|---|
 | `name` | `string` | no | Named (persistent) store; omit for an unnamed (temporary) one. |
 
-**Output:** the Store object (unwrapped `data`).
+**Output:** the key-value store's record object (unwrapped `data`).
 **Apify API:** [`POST /v2/key-value-stores`](https://docs.apify.com/api/v2/key-value-stores-post)
 
-### `kvs.set({ storeId, key, value, contentType? })` → `void`
+### `keyValueStore.set({ storeId, key, value, contentType? })` → `void`
 
 Write a record. The content type is inferred from `value`:
 
@@ -318,7 +326,7 @@ Write a record. The content type is inferred from `value`:
 **Output:** none (resolves once the record is stored).
 **Apify API:** [`PUT /v2/key-value-stores/{storeId}/records/{key}`](https://docs.apify.com/api/v2/key-value-store-record-put)
 
-### `kvs.get({ storeId, key })` → `value` \| `null`
+### `keyValueStore.get({ storeId, key })` → `value` \| `null`
 
 Read a record.
 
@@ -337,7 +345,7 @@ Returns **`null`** when the key does not exist (404) instead of throwing, so you
 can do lookup-or-default without a `try/catch`.
 **Apify API:** [`GET /v2/key-value-stores/{storeId}/records/{key}`](https://docs.apify.com/api/v2/key-value-store-record-get)
 
-### `kvs.list({ storeId, limit?, exclusiveStartKey? })` → `{ items, … }`
+### `keyValueStore.list({ storeId, limit?, exclusiveStartKey? })` → `{ items, … }`
 
 List keys in a store.
 

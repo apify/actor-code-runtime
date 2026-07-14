@@ -178,8 +178,10 @@ Every method takes one options object and returns parsed JSON
 [here](https://github.com/apify/actor-code-runtime/blob/master/docs/API.md).
 
 ```js
+// Store — GET /v2/store, a top-level Apify API resource (not an Actor method)
+apify.store({ search, limit?, category? })                  // → actors[]
+
 // Actors
-apify.actor.search({ query, limit?, category? })            // → actors[]
 apify.actor.get({ actorId })                                  // → actor
 apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
 apify.actor.call({ actorId, ...startOpts, waitForFinishSecs = 60 })           // → run (waits)
@@ -199,10 +201,10 @@ apify.dataset.iterate({ datasetId, batchSize = 1000, ...filters })  // → async
 apify.dataset.inferFields({ datasetId, sample = 5 })        // → { itemCount, fields[] }
 
 // Key-value stores
-apify.kvs.create({ name? })                                 // → store
-apify.kvs.set({ storeId, key, value, contentType? })        // → void
-apify.kvs.get({ storeId, key })                             // → value | null
-apify.kvs.list({ storeId, limit?, exclusiveStartKey? })     // → { items }
+apify.keyValueStore.create({ name? })                        // → store
+apify.keyValueStore.set({ storeId, key, value, contentType? })  // → void
+apify.keyValueStore.get({ storeId, key })                    // → value | null
+apify.keyValueStore.list({ storeId, limit?, exclusiveStartKey? })  // → { items }
 ```
 
 ## Learn more

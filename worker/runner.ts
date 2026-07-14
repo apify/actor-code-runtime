@@ -54,8 +54,8 @@ interface ApiCallOptions {
     contentType?: string;
 }
 
-interface SearchOptions {
-    query: string;
+interface StoreSearchOptions {
+    search: string;
     limit?: number;
     category?: string;
 }
@@ -125,17 +125,17 @@ interface PushItemsOptions {
     items: unknown[];
 }
 
-interface KvsGetOptions {
+interface KeyValueStoreGetOptions {
     storeId: string;
     key: string;
 }
 
-interface KvsSetOptions extends KvsGetOptions {
+interface KeyValueStoreSetOptions extends KeyValueStoreGetOptions {
     value: unknown;
     contentType?: string;
 }
 
-interface KvsListOptions {
+interface KeyValueStoreListOptions {
     storeId: string;
     limit?: number;
     exclusiveStartKey?: string;
@@ -250,11 +250,6 @@ function makeApifyBinding(token: string, apiV2: string) {
         });
 
     const actor = {
-        // GET /v2/store — Apify Store search. Returns the items array directly.
-        search: ({ query, limit, category }: SearchOptions): Promise<ApifyRecord[]> =>
-            apiData('GET', '/store', { searchParams: { search: query, limit, category } })
-                .then((page: { items: ApifyRecord[] }) => page.items),
-
         get: ({ actorId }: ActorIdOptions): Promise<ApifyRecord> =>
             apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
 
@@ -378,16 +373,16 @@ function makeApifyBinding(token: string, apiV2: string) {
         },
     };
 
-    const kvs = {
+    const keyValueStore = {
         // Returns the value directly (parsed when JSON, string when text/*, Uint8Array otherwise).
         // Returns null when the key does not exist (404), not an error — this matches the common
         // "lookup or default" pattern in code.
-        get: async ({ storeId, key }: KvsGetOptions): Promise<unknown> => {
+        get: async ({ storeId, key }: KeyValueStoreGetOptions): Promise<unknown> => {
             const response = await realFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
                 headers: baseHeaders,
             });
             if (response.status === 404) return null;
-            if (!response.ok) throw new Error(`GET kvs.get failed: ${response.status} ${await response.text()}`);
+            if (!response.ok) throw new Error(`GET keyValueStore.get failed: ${response.status} ${await response.text()}`);
             const contentType = response.headers.get('content-type') ?? '';
             if (contentType.includes('application/json')) return response.json();
             if (contentType.startsWith('text/')) return response.text();
@@ -396,7 +391,7 @@ function makeApifyBinding(token: string, apiV2: string) {
 
         // `value`: object → application/json; string → text/plain; Uint8Array/ArrayBuffer →
         // application/octet-stream (or whatever the caller passed via `contentType`).
-        set: async ({ storeId, key, value, contentType }: KvsSetOptions): Promise<void> => {
+        set: async ({ storeId, key, value, contentType }: KeyValueStoreSetOptions): Promise<void> => {
             let body: BodyInit;
             let resolvedContentType = contentType;
             if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
@@ -415,7 +410,7 @@ function makeApifyBinding(token: string, apiV2: string) {
             });
         },
 
-        list: ({ storeId, limit, exclusiveStartKey }: KvsListOptions): Promise<ApifyRecord> =>
+        list: ({ storeId, limit, exclusiveStartKey }: KeyValueStoreListOptions): Promise<ApifyRecord> =>
             apiData('GET', `/key-value-stores/${encodeURIComponent(storeId)}/keys`, {
                 searchParams: { limit, exclusiveStartKey },
             }),
@@ -424,13 +419,21 @@ function makeApifyBinding(token: string, apiV2: string) {
             apiData('POST', '/key-value-stores', { searchParams: { name } }),
     };
 
+    // GET /v2/store — Apify Store search (a top-level resource in the Apify API,
+    // tagged `Store`, distinct from `Actors` — hence a top-level binding rather
+    // than an `actor.*` method). Returns the items array directly.
+    const store = ({ search, limit, category }: StoreSearchOptions): Promise<ApifyRecord[]> =>
+        apiData('GET', '/store', { searchParams: { search, limit, category } })
+            .then((page: { items: ApifyRecord[] }) => page.items);
+
     // Freeze every namespace (and the wrapper) so the script can't reassign a method to
     // corrupt its own behavior or, for `console` below, its own output capture.
     return Object.freeze({
         actor: Object.freeze(actor),
+        store,
         run: Object.freeze(run),
         dataset: Object.freeze(dataset),
-        kvs: Object.freeze(kvs),
+        keyValueStore: Object.freeze(keyValueStore),
     });
 }
 
