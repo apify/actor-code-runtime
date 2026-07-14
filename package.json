@@ -11,7 +11,7 @@
         "node": ">=24"
     },
     "scripts": {
-        "build": "tsc -p tsconfig.json",
+        "build": "tsc -p tsconfig.json && sed -i '/^export {};$/d' tests/*.js",
         "typecheck": "tsc --noEmit -p tsconfig.json"
     },
     "devDependencies": {

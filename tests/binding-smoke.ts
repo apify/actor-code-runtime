@@ -2,14 +2,22 @@
 // the Actor's `code` input by test.sh and executed on the built Actor via
 // `apify call`. Exercises every binding method and prints a sentinel line
 // (ALL_TESTS_PASSED) that test.sh greps for.
-const results = [];
-async function check(name, fn) {
+//
+// `export {}` marks this file as its own ES module, so its top-level consts
+// don't collide with the other probe's (both are type-checked in one tsc
+// program) and top-level await below is legal. `pnpm build` strips this line
+// post-compile (see package.json) -- left in, it would be a syntax error once
+// spliced into the wrapping `async function run(apify, console) { ... }`.
+export {};
+
+const results: boolean[] = [];
+async function check(name: string, fn: () => Promise<unknown>): Promise<void> {
     try {
         const out = await fn();
         console.log(`PASS ${name}: ${out ?? ''}`);
         results.push(true);
     } catch (e) {
-        console.error(`FAIL ${name}: ${e.message}`);
+        console.error(`FAIL ${name}: ${(e as Error).message}`);
         results.push(false);
     }
 }
@@ -22,15 +30,15 @@ await check('actor.search', async () => {
     if (!Array.isArray(items)) throw new Error('expected array');
     return `${items.length} actors`;
 });
-await check('actor.getDetails', async () => {
-    const d = await apify.actor.getDetails({ actorId: ACTOR });
+await check('actor.get', async () => {
+    const d = await apify.actor.get({ actorId: ACTOR });
     return `${d.username}/${d.name}`;
 });
 
 // ---- dataset ----
-let datasetId;
+let datasetId = '';
 await check('dataset.create', async () => {
-    datasetId = (await apify.dataset.create()).id;
+    datasetId = (await apify.dataset.create()).id as string;
     return datasetId;
 });
 await check('dataset.pushItems', async () => {
@@ -41,8 +49,8 @@ await check('dataset.listItems', async () => {
     const items = await apify.dataset.listItems({ datasetId });
     return `${items.length} items`;
 });
-await check('dataset.getSchema', async () => {
-    const s = await apify.dataset.getSchema({ datasetId });
+await check('dataset.inferFields', async () => {
+    const s = await apify.dataset.inferFields({ datasetId });
     return `itemCount=${s.itemCount} fields=${s.fields.map((f) => f.name).join(',')}`;
 });
 await check('dataset.iterate', async () => {
@@ -52,9 +60,9 @@ await check('dataset.iterate', async () => {
 });
 
 // ---- key-value store ----
-let storeId;
+let storeId = '';
 await check('kvs.create', async () => {
-    storeId = (await apify.kvs.create()).id;
+    storeId = (await apify.kvs.create()).id as string;
     return storeId;
 });
 await check('kvs.set', async () => {
@@ -63,46 +71,46 @@ await check('kvs.set', async () => {
     return 'set obj + txt';
 });
 await check('kvs.get', async () => {
-    const obj = await apify.kvs.get({ storeId, key: 'obj' });
+    const obj = await apify.kvs.get({ storeId, key: 'obj' }) as { hello: string };
     const txt = await apify.kvs.get({ storeId, key: 'txt' });
     const missing = await apify.kvs.get({ storeId, key: 'nope' });
     return `obj.hello=${obj.hello} txt=${txt} missing=${missing}`;
 });
 await check('kvs.list', async () => {
-    const l = await apify.kvs.list({ storeId });
+    const l = await apify.kvs.list({ storeId }) as { items: unknown[] };
     return `${l.items.length} keys`;
 });
 
 // ---- run lifecycle ----
-let runId;
+let runId = '';
 await check('actor.start', async () => {
     const run = await apify.actor.start({ actorId: ACTOR });
-    runId = run.id;
+    runId = run.id as string;
     return `runId=${runId} status=${run.status}`;
 });
 await check('run.get', async () => {
     return `status=${(await apify.run.get({ runId })).status}`;
 });
-await check('run.wait', async () => {
-    return `status=${(await apify.run.wait({ runId, waitForFinishSecs: 60 })).status}`;
+await check('run.waitForFinish', async () => {
+    return `status=${(await apify.run.waitForFinish({ runId, waitForFinishSecs: 60 })).status}`;
 });
 await check('run.getLog', async () => {
     return `${(await apify.run.getLog({ runId, limit: 200 })).length} chars`;
 });
 
 // ---- run + get items (sync) ----
-await check('actor.run', async () => {
-    return `status=${(await apify.actor.run({ actorId: ACTOR, waitForFinishSecs: 60 })).status}`;
+await check('actor.call', async () => {
+    return `status=${(await apify.actor.call({ actorId: ACTOR, waitForFinishSecs: 60 })).status}`;
 });
-await check('actor.runAndGetItems', async () => {
-    const { run, items } = await apify.actor.runAndGetItems({ actorId: ACTOR, limit: 5, waitForFinishSecs: 60 });
+await check('actor.callAndGetItems', async () => {
+    const { run, items } = await apify.actor.callAndGetItems({ actorId: ACTOR, limit: 5, waitForFinishSecs: 60 });
     return `status=${run.status} items=${items.length}`;
 });
 
 // ---- abort ----
 await check('run.abort', async () => {
     const run = await apify.actor.start({ actorId: ACTOR });
-    return `status=${(await apify.run.abort({ runId: run.id })).status}`;
+    return `status=${(await apify.run.abort({ runId: run.id as string })).status}`;
 });
 
 const passed = results.filter(Boolean).length;

@@ -434,6 +434,11 @@ function makeApifyBinding(token: string, apiV2: string) {
     });
 }
 
+// The shape handed to user code as the `apify` binding. Exported (type-only —
+// erased at compile time) so tests/*.ts can type-check probes against the same
+// surface real usercode.js runs against, without importing runner.ts at runtime.
+export type ApifyBinding = ReturnType<typeof makeApifyBinding>;
+
 // Push the captured streams as a single item to the run's default dataset.
 async function pushOutput(apiV2: string, token: string, env: Env, item: OutputItem): Promise<void> {
     const datasetId = env.DEFAULT_DATASET_ID || env.DEFAULT_DATASET_ID_LEGACY;

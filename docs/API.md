@@ -63,7 +63,7 @@ Fetch the full record for one Actor.
 ### `actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })` → `Run`
 
 Start an Actor **asynchronously** and return immediately with a run record in
-`READY`/`RUNNING` state. Use [`run.wait`](#runwait--run) to block for the result.
+`READY`/`RUNNING` state. Use [`run.waitForFinish`](#runwaitforfinish--run) to block for the result.
 
 | Param | Type | Required | Description |
 |---|---|---|---|

@@ -8,8 +8,16 @@
 // *.apify.com fetch allowlist — finding A) and process.env (which held the
 // run's APIFY_TOKEN — finding B), and makes the "no imports" docs accurate
 // (finding C). fetch() and the apify binding must still work.
-const results = [];
-function check(name, cond, detail = '') {
+//
+// `export {}` marks this file as its own ES module, so its top-level consts
+// don't collide with the other probe's (both are type-checked in one tsc
+// program) and top-level await below is legal. `pnpm build` strips this line
+// post-compile (see package.json) -- left in, it would be a syntax error once
+// spliced into the wrapping `async function run(apify, console) { ... }`.
+export {};
+
+const results: boolean[] = [];
+function check(name: string, cond: boolean, detail = ''): void {
     if (cond) {
         console.log(`PASS ${name}: ${detail}`);
         results.push(true);
@@ -38,12 +46,12 @@ check('fetch available', typeof fetch === 'function', `typeof fetch = ${typeof f
 // synchronously with a "Blocked fetch" message BEFORE any network I/O; anything
 // else (a real network/HTTP error) means guard let the request through. So we
 // classify by the error message, not by whether the request ultimately succeeds.
-async function guardBlocks(url) {
+async function guardBlocks(url: string): Promise<boolean> {
     try {
         await fetch(url);
         return false; // request went out — guard allowed it
     } catch (e) {
-        return /Blocked fetch/.test(e.message); // guard rejection vs. network error
+        return /Blocked fetch/.test((e as Error).message); // guard rejection vs. network error
     }
 }
 
@@ -69,14 +77,14 @@ for (const url of blockedTargets) {
 // are web-standard globals that connect directly (not through the fetch guard),
 // so a script could otherwise open a wss:// / SSE channel to any public host and
 // exfiltrate around the *.apify.com allowlist (apify/ai-team#216 finding A).
-function blocksConstruct(name, url) {
-    const Ctor = globalThis[name];
+function blocksConstruct(name: string, url: string): boolean {
+    const Ctor = (globalThis as Record<string, unknown>)[name];
     if (typeof Ctor !== 'function') return true; // absent → not an egress path
     try {
-        new Ctor(url);
+        new (Ctor as new (u: string) => unknown)(url);
         return false; // constructed → egress opened
     } catch (e) {
-        return /Blocked/.test(e.message); // our guard rejection vs. any other error
+        return /Blocked/.test((e as Error).message); // our guard rejection vs. any other error
     }
 }
 check('WebSocket blocked', blocksConstruct('WebSocket', 'wss://echo.websocket.org'), 'no wss egress');
@@ -88,7 +96,7 @@ try {
     const found = await apify.actor.search({ query: 'hello world', limit: 1 });
     bindingWorks = Array.isArray(found);
 } catch (e) {
-    console.error(`apify.actor.search threw: ${e.message}`);
+    console.error(`apify.actor.search threw: ${(e as Error).message}`);
 }
 check('apify binding works', bindingWorks, bindingWorks ? 'actor.search ok' : 'binding broken');
 

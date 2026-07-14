@@ -8,11 +8,15 @@ set -eu
 
 cd "$(dirname "$0")"
 
-# Probes run against the built Actor. Add a file here to register a new probe.
+# Probes are written in tests/*.ts and compiled by `pnpm build`; add a .ts file
+# there to register a new probe. Run against the built Actor.
 PROBES="tests/binding-smoke.js tests/sandbox-isolation.js"
 
 command -v apify >/dev/null 2>&1 || { echo "apify CLI not found" >&2; exit 1; }
 command -v jq    >/dev/null 2>&1 || { echo "jq not found" >&2; exit 1; }
+
+echo "==> pnpm build"
+pnpm build
 
 input_json="$(mktemp)"
 trap 'rm -f "$input_json"' EXIT

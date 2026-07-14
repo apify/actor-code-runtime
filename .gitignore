@@ -1,8 +1,9 @@
 node_modules/
 # Generated at container startup by entrypoint.sh (never checked in):
 worker/usercode.js
-# Compiled from worker/*.ts by `pnpm build` (tsconfig.json emits next to the source):
+# Compiled from worker/*.ts and tests/*.ts by `pnpm build` (tsconfig.json emits next to source):
 worker/runner.js
 worker/guard.js
+tests/*.js
 *.log
 .DS_Store
