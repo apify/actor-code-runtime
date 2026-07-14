@@ -165,11 +165,20 @@ while (!TERMINAL.includes(run.status)) {
 
 ## Limitations
 
-Actor runs launched from inside the sandbox (via the `apify` binding) are
-recorded as ordinary Actor runs — they aren't attributed back to the MCP
-session that ultimately triggered them. If you're measuring "Actor runs
-driven by MCP," Code Mode's sub-runs won't show up as such. Known,
-unresolved, tracked separately from this Actor.
+Sub-runs started from inside the sandbox (via `apify.actor.start/call/callAndGetItems`)
+get `meta.origin: 'MCP'` on the Apify platform, same as this Actor's own run, when
+this Actor was itself started via the Apify MCP Server — this Actor reads its own
+`APIFY_META_ORIGIN` env var (platform-set, not spoofable from inside the sandbox)
+and forwards `X-Apify-Request-Origin: MCP` on its own API calls only when that's
+`MCP`. Every sub-run also gets a platform-native `meta.actorRunId` link back to
+this run regardless of origin (set automatically from the run-scoped token, no
+code needed here) — so even a fully generic query can already walk sub-run →
+`meta.actorRunId` → parent `meta.origin` to reconstruct the chain; the origin
+forwarding above just makes single-field origin queries work without that join.
+
+What's still not attributed: the specific MCP *session* (which client, which
+conversation) that triggered this Actor's own run in the first place — that
+context isn't part of the platform's Run schema at all, on or off Code Mode.
 
 ## The `apify` binding
 

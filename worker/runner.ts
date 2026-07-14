@@ -153,6 +153,13 @@ interface Env {
     DEFAULT_DATASET_ID?: string;
     DEFAULT_DATASET_ID_LEGACY?: string;
     API_BASE_URL?: string;
+    // APIFY_META_ORIGIN, forwarded from the platform's own env var of the same
+    // name (bound as PARENT_ORIGIN in config.capnp). Reflects this run's own
+    // meta.origin, set by apify-core from the X-Apify-Request-Origin request
+    // header the caller sent when creating THIS run — 'MCP' when apify-mcp-server
+    // started it. Platform-injected, not user-settable: unlike an Actor input
+    // field, a script running inside this Actor cannot spoof it.
+    PARENT_ORIGIN?: string;
 }
 
 interface OutputItem {
@@ -177,8 +184,25 @@ function errorDetail(err: unknown): string {
     return err instanceof Error && err.stack ? err.stack : errorMessage(err);
 }
 
-function makeApifyBinding(token: string, apiV2: string) {
-    const baseHeaders: Record<string, string> = { Authorization: `Bearer ${token}` };
+// 'MCP' matches apify-core's META_ORIGINS.MCP / apify-mcp-server's own
+// X-Apify-Request-Origin header value — reusing the platform's existing
+// convention rather than inventing a new one.
+const MCP_ORIGIN = 'MCP';
+const REQUEST_ORIGIN_HEADER = 'X-Apify-Request-Origin';
+
+function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | undefined) {
+    // Every request this Actor makes identifies itself; requests made while THIS
+    // run's own origin is MCP additionally forward that origin so runs started by
+    // apify.actor.start/call/callAndGetItems() below get meta.origin: 'MCP' too,
+    // instead of the platform's default meta.origin: 'ACTOR' for actor-to-actor
+    // calls. Gated on parentOrigin (verified server-side, see the Env.PARENT_ORIGIN
+    // comment) rather than any Actor input, so a script can't forge an origin this
+    // run wasn't actually started with.
+    const baseHeaders: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'apify-code-runtime',
+        ...(parentOrigin === MCP_ORIGIN ? { [REQUEST_ORIGIN_HEADER]: MCP_ORIGIN } : {}),
+    };
 
     // Build a URL with optional query params; null/undefined values are dropped.
     const buildUrl = (path: string, searchParams?: SearchParams): URL => {
@@ -490,7 +514,7 @@ export default {
         let exitCode = 0;
         let statusMessage = 'Script completed';
         try {
-            await run(makeApifyBinding(token, apiV2), captureConsole);
+            await run(makeApifyBinding(token, apiV2, env.PARENT_ORIGIN), captureConsole);
         } catch (err) {
             stderr.push(errorDetail(err));
             exitCode = 1;

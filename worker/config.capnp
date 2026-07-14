@@ -34,6 +34,9 @@ const codeRuntime :Workerd.Worker = (
         (name = "DEFAULT_DATASET_ID", fromEnvironment = "ACTOR_DEFAULT_DATASET_ID"),
         (name = "DEFAULT_DATASET_ID_LEGACY", fromEnvironment = "APIFY_DEFAULT_DATASET_ID"),
         (name = "API_BASE_URL", fromEnvironment = "APIFY_API_BASE_URL"),
+        # This run's own meta.origin (e.g. "MCP" when apify-mcp-server started it),
+        # forwarded to sub-runs this script starts — see PARENT_ORIGIN in runner.ts.
+        (name = "PARENT_ORIGIN", fromEnvironment = "APIFY_META_ORIGIN"),
     ],
     globalOutbound = "internet",
     compatibilityDate = "2026-01-15",
