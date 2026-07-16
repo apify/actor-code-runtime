@@ -12,10 +12,15 @@ COPY worker/ ./worker/
 # --ignore-scripts skips workerd's postinstall (a binary-download fallback we
 # don't need — the binary ships in the @cloudflare/workerd-linux-64 optional dep)
 # and avoids pnpm's hard error on unapproved dependency build scripts. Full
-# (non --prod) install: typescript is a devDependency, needed by `pnpm build` below.
+# (non --prod) install: typescript is a devDependency, needed to compile below.
+# Compile with tsc directly, not `pnpm run build`: that script also sed's
+# tests/*.js (dev-only probe fixtures for test.sh, submitted as Actor input at
+# run time — never part of the image), which isn't copied into this build
+# context and doesn't need to be; tsconfig's tests/*.ts include glob simply
+# matches nothing here.
 RUN corepack enable \
     && pnpm install --frozen-lockfile --ignore-scripts \
-    && pnpm run build \
+    && pnpm exec tsc -p tsconfig.json \
     && BIN="$(node -e "process.stdout.write(require('workerd').default)")" \
     && cp "$BIN" /workerd \
     && chmod +x /workerd
