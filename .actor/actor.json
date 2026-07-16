@@ -6,6 +6,7 @@
     "version": "0.1",
     "buildTag": "latest",
     "usesStandbyMode": false,
+    "fullReadmeOnly": true,
     "defaultRunOptions": {
         "timeoutSecs": 900,
         "memoryMbytes": 1024
