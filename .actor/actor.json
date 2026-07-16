@@ -2,7 +2,7 @@
     "actorSpecification": 1,
     "name": "code-runtime",
     "title": "Code Runtime",
-    "description": "Runs one JS script in a sandboxed Actor with an apify binding (run Actors, datasets & KV stores). Best for data-heavy jobs: scrape hundreds+ places/items, chain Actor outputs, and filter/sort/aggregate in one billed run. Results land in the dataset.",
+    "description": "Runs one JS script in a sandboxed Actor with an apify binding (run Actors, datasets & KV stores). Best for data-heavy jobs: scrape hundreds+ places/items, chain Actor outputs, and filter/sort/aggregate in one billed run. Results land in the dataset. Read the README before use.",
     "version": "0.1",
     "buildTag": "latest",
     "usesStandbyMode": false,
@@ -43,7 +43,7 @@
             "actorSpecification": 1,
             "description": "Present only if the script ran to completion (returned or threw). A run-level timeout or OOM kill produces zero items for that run — the calling Actor-run's own status (SUCCEEDED vs FAILED/TIMED-OUT) is the signal for that case, not item presence.",
             "fields": {
-                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "properties": {
                     "stdout": {
