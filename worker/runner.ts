@@ -28,7 +28,6 @@ function requireRealFetch(): typeof globalThis.fetch {
 }
 const realFetch = requireRealFetch();
 
-const DEFAULT_ITERATE_BATCH = 1000;
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
 
 // --- Types ---------------------------------------------------------------
@@ -57,6 +56,7 @@ interface ApiCallOptions {
 interface StoreSearchOptions {
     search: string;
     limit?: number;
+    offset?: number;
     category?: string;
 }
 
@@ -101,9 +101,23 @@ interface DatasetListOptions {
     desc?: boolean;
 }
 
-interface DatasetIterateOptions extends Omit<DatasetListOptions, 'offset'> {
-    batchSize?: number;
+// One page, from a single request. Mirrors apify-client's PaginatedList shape (items, count,
+// offset, limit, desc) except `total`, which stays deliberately unsurfaced — see makePaginatedList.
+interface ItemsPage<T> {
+    items: T[];
+    count: number;
+    offset: number;
+    limit: number;
 }
+
+interface DatasetItemsPage extends ItemsPage<ApifyRecord> {
+    desc: boolean;
+}
+
+// Awaiting this value resolves to one page (ItemsPage); `for await`-ing it auto-paginates
+// through every item, one at a time. Same dual nature as apify-client's own PaginatedIterator
+// (one call, one name, two ways to consume it) — see makePaginatedList for the mechanism.
+type PaginatedItems<Page extends ItemsPage<unknown>> = Promise<Page> & AsyncIterable<Page['items'][number]>;
 
 interface DatasetSchemaOptions {
     datasetId: string;
@@ -182,6 +196,44 @@ function errorMessage(err: unknown): string {
 
 function errorDetail(err: unknown): string {
     return err instanceof Error && err.stack ? err.stack : errorMessage(err);
+}
+
+// Wraps a page-fetcher into a value that's both a Promise (awaits to the first page) and an
+// AsyncIterable (walks every page, yielding one item at a time) — the same dual nature as
+// apify-client's own PaginatedIterator, implemented via the same trick it uses: attach
+// Symbol.asyncIterator to a live Promise object (a Promise is a plain object at runtime, so
+// this is legal, no class or wrapper needed).
+//
+// One shared implementation, unlike apify-client itself, which independently re-implements
+// this exact trick three times (dataset items, key-value-store keys, request-queue requests)
+// with three subtly different cursor/offset conventions — see docs/API.md's Conventions
+// section for that comparison. Every paginated method in this binding goes through this one
+// function instead.
+//
+// Continuation stops the same way the old dataset.iterate() did: a page shorter than the
+// limit it was asked for is the natural end-of-data signal (no dataset `total` is trusted —
+// see the listItems comment below for why).
+function makePaginatedList<T, Page extends ItemsPage<T>>(
+    fetchPage: (offset: number, limit: number | undefined) => Promise<Page>,
+    offset: number,
+    limit: number | undefined,
+): PaginatedItems<Page> {
+    const firstPagePromise = fetchPage(offset, limit);
+
+    async function* iterateAll(): AsyncGenerator<T> {
+        let page = await firstPagePromise;
+        yield* page.items;
+        let nextOffset = page.offset + page.items.length;
+        while (page.items.length > 0 && page.items.length >= page.limit) {
+            page = await fetchPage(nextOffset, page.limit);
+            yield* page.items;
+            nextOffset += page.items.length;
+        }
+    }
+
+    return Object.defineProperty(firstPagePromise, Symbol.asyncIterator, {
+        value: iterateAll,
+    }) as PaginatedItems<Page>;
 }
 
 // 'MCP' matches apify-core's META_ORIGINS.MCP / apify-mcp-server's own
@@ -290,7 +342,7 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
         // `actor.call()` — same underlying request, no self-reference to `actor` needed.
         callAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
             const runRecord = await createRun({ actorId, input, waitForFinishSecs: 60, ...runOpts });
-            const items = await dataset.listItems({
+            const { items } = await dataset.listItems({
                 datasetId: runRecord.defaultDatasetId as string, fields, limit,
             });
             return { run: runRecord, items };
@@ -328,40 +380,36 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
     };
 
     const dataset = {
-        // Returns the items array directly (no wrapper). The Apify API's
+        // `await` resolves to one page: { items, count, offset, limit, desc }. `for await`
+        // auto-paginates through the entire dataset, one item at a time (replaces the old,
+        // separate dataset.iterate() method — see makePaginatedList). offset/limit/desc echo
+        // back what the API actually applied (read from its x-apify-pagination-* response
+        // headers, not just the request), except `total`: the Apify API's
         // `x-apify-pagination-total` header is unreliable for freshly-created datasets
-        // (eventually consistent), so we don't surface a `total`. Use `inferFields` if you
-        // need an item count, or iterate to consume the whole dataset.
-        listItems: async ({ datasetId, fields, omit, limit, offset, clean, desc }: DatasetListOptions): Promise<ApifyRecord[]> => {
-            const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
-                searchParams: {
-                    fields: fields?.join(','),
-                    omit: omit?.join(','),
-                    limit,
-                    offset,
-                    clean: clean ? '1' : undefined,
-                    desc: desc ? '1' : undefined,
-                },
-            });
-            return response.json();
-        },
-
-        // Async generator over the entire dataset. Pages internally in `batchSize` chunks
-        // so the user can `for await (const item of apify.dataset.iterate({...}))` without
-        // worrying about offsets. Stops when a page returns fewer items than `batchSize`
-        // (the natural end-of-data signal — pagination total is not used, see listItems).
-        iterate: async function* ({ datasetId, fields, omit, clean, desc, batchSize = DEFAULT_ITERATE_BATCH }: DatasetIterateOptions): AsyncGenerator<ApifyRecord> {
-            let offset = 0;
-            while (true) {
-                const items = await dataset.listItems({
-                    datasetId, fields, omit, clean, desc,
-                    limit: batchSize, offset,
+        // (eventually consistent), so it's never surfaced — `count` (this page's actual item
+        // count) is what you want instead. Use `inferFields` if you need an approximate total.
+        listItems: ({ datasetId, fields, omit, limit, offset = 0, clean, desc }: DatasetListOptions): PaginatedItems<DatasetItemsPage> => {
+            const fetchPage = async (pageOffset: number, pageLimit?: number): Promise<DatasetItemsPage> => {
+                const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
+                    searchParams: {
+                        fields: fields?.join(','),
+                        omit: omit?.join(','),
+                        limit: pageLimit,
+                        offset: pageOffset,
+                        clean: clean ? '1' : undefined,
+                        desc: desc ? '1' : undefined,
+                    },
                 });
-                if (items.length === 0) break;
-                for (const item of items) yield item;
-                if (items.length < batchSize) break;
-                offset += items.length;
-            }
+                const items: ApifyRecord[] = await response.json();
+                return {
+                    items,
+                    count: items.length,
+                    offset: Number(response.headers.get('x-apify-pagination-offset') ?? pageOffset),
+                    limit: Number(response.headers.get('x-apify-pagination-limit') ?? pageLimit ?? items.length),
+                    desc: response.headers.get('x-apify-pagination-desc') === 'true',
+                };
+            };
+            return makePaginatedList(fetchPage, offset, limit);
         },
 
         // Apify has no dedicated schema endpoint; we infer one from a small sample of items.
@@ -369,7 +417,7 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
         // dataset schema (a different concept, described in this Actor's own actor.json).
         inferFields: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
             const meta = await apiData('GET', `/datasets/${encodeURIComponent(datasetId)}`);
-            const items = await dataset.listItems({ datasetId, limit: sample });
+            const { items } = await dataset.listItems({ datasetId, limit: sample });
             const fields = new Map<string, Set<string>>();
             for (const item of items) {
                 for (const [name, value] of Object.entries(item ?? {})) {
@@ -445,10 +493,18 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
 
     // GET /v2/store — Apify Store search (a top-level resource in the Apify API,
     // tagged `Store`, distinct from `Actors` — hence a top-level binding rather
-    // than an `actor.*` method). Returns the items array directly.
-    const store = ({ search, limit, category }: StoreSearchOptions): Promise<ApifyRecord[]> =>
-        apiData('GET', '/store', { searchParams: { search, limit, category } })
-            .then((page: { items: ApifyRecord[] }) => page.items);
+    // than an `actor.*` method). Same dual nature as dataset.listItems: `await` for one
+    // page, `for await` to walk every match. offset/limit echo back the request (the
+    // endpoint's own JSON body doesn't carry pagination metadata beyond `items`, unlike
+    // dataset's header-based pagination — see makePaginatedList).
+    const store = ({ search, limit, offset = 0, category }: StoreSearchOptions): PaginatedItems<ItemsPage<ApifyRecord>> => {
+        const fetchPage = async (pageOffset: number, pageLimit: number | undefined): Promise<ItemsPage<ApifyRecord>> => {
+            const page = await apiData('GET', '/store', { searchParams: { search, limit: pageLimit, offset: pageOffset, category } });
+            const items: ApifyRecord[] = page.items;
+            return { items, count: items.length, offset: pageOffset, limit: pageLimit ?? items.length };
+        };
+        return makePaginatedList(fetchPage, offset, limit);
+    };
 
     // Freeze every namespace (and the wrapper) so the script can't reassign a method to
     // corrupt its own behavior or, for `console` below, its own output capture.

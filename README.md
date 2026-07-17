@@ -165,6 +165,24 @@ for (let i = 0; i < inputs.length; i += CHUNK) {
 console.log(JSON.stringify(results.slice(0, 5))); // small summary, not the full dump
 ```
 
+### Read an entire dataset without managing offsets
+
+`dataset.listItems` (and `store`) return a value that's both a `Promise` (one
+page) and an `AsyncIterable` (every item, auto-paginated) — pick whichever
+you need:
+
+```js
+// One page — e.g. a quick peek
+const { items, count } = await apify.dataset.listItems({ datasetId, limit: 10 });
+
+// Every item, however many pages that takes
+let matches = 0;
+for await (const item of apify.dataset.listItems({ datasetId })) {
+    if (item.rating >= 4.5) matches++;
+}
+console.log(`${matches} matching items`);
+```
+
 ### Runs longer than 60s: start, then poll
 
 `actor.call`'s wait is capped at 60s per request (a REST API limit, not this
@@ -197,13 +215,18 @@ context isn't part of the platform's Run schema at all, on or off Code Mode.
 
 ## The `apify` binding
 
-Every method takes one options object and returns parsed JSON
-(`?` = optional, `= x` = default). Full API documentation is available
+Every method takes one options object and returns parsed JSON — except
+`store` and `dataset.listItems`, which return a value that's both a `Promise`
+(one page) and an `AsyncIterable` (every match/item, auto-paginated) — see
+their own lines below (`?` = optional, `= x` = default). Full API
+documentation is available
 [here](https://github.com/apify/actor-code-runtime/blob/master/docs/API.md).
 
 ```js
 // Store — GET /v2/store, a top-level Apify API resource (not an Actor method)
-apify.store({ search, limit?, category? })                  // → actors[]
+// `await` for one page, `for await` to walk every match (same dual nature as
+// dataset.listItems below).
+apify.store({ search, limit?, offset?, category? })  // → { items, count, offset, limit }
 
 // Actors
 apify.actor.get({ actorId })                                  // → actor
@@ -220,8 +243,9 @@ apify.run.getLog({ runId, limit? })                         // → string
 // Datasets
 apify.dataset.create({ name? })                             // → dataset
 apify.dataset.pushItems({ datasetId, items })               // → void
-apify.dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })  // → items[]
-apify.dataset.iterate({ datasetId, batchSize = 1000, ...filters })  // → async iterable
+// `await` for one page: { items, count, offset, limit, desc }. `for await` auto-paginates
+// through the whole dataset, one item at a time — no separate iterate() method needed.
+apify.dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })
 apify.dataset.inferFields({ datasetId, sample = 5 })        // → { itemCount, fields[] }
 
 // Key-value stores

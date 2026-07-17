@@ -26,9 +26,14 @@ const ACTOR = 'apify/hello-world';
 
 // ---- actor (read) ----
 await check('store', async () => {
-    const items = await apify.store({ search: 'hello world', limit: 3 });
-    if (!Array.isArray(items)) throw new Error('expected array');
-    return `${items.length} actors`;
+    const page = await apify.store({ search: 'hello world', limit: 3 });
+    if (!Array.isArray(page.items)) throw new Error('expected items array');
+    return `${page.count} actors`;
+});
+await check('store (for await)', async () => {
+    let n = 0;
+    for await (const _ of apify.store({ search: 'hello world', limit: 3 })) n++;
+    return `${n} actors iterated`;
 });
 await check('actor.get', async () => {
     const d = await apify.actor.get({ actorId: ACTOR });
@@ -46,16 +51,16 @@ await check('dataset.pushItems', async () => {
     return '2 pushed';
 });
 await check('dataset.listItems', async () => {
-    const items = await apify.dataset.listItems({ datasetId });
-    return `${items.length} items`;
+    const page = await apify.dataset.listItems({ datasetId });
+    return `${page.count} items, offset=${page.offset}, limit=${page.limit}`;
 });
 await check('dataset.inferFields', async () => {
     const s = await apify.dataset.inferFields({ datasetId });
     return `itemCount=${s.itemCount} fields=${s.fields.map((f) => f.name).join(',')}`;
 });
-await check('dataset.iterate', async () => {
+await check('dataset.listItems (for await)', async () => {
     let n = 0;
-    for await (const _ of apify.dataset.iterate({ datasetId, batchSize: 1 })) n++;
+    for await (const _ of apify.dataset.listItems({ datasetId, limit: 1 })) n++;
     return `${n} iterated`;
 });
 

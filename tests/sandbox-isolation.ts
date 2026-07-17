@@ -94,7 +94,7 @@ check('EventSource blocked', blocksConstruct('EventSource', 'https://example.com
 let bindingWorks = false;
 try {
     const found = await apify.store({ search: 'hello world', limit: 1 });
-    bindingWorks = Array.isArray(found);
+    bindingWorks = Array.isArray(found.items);
 } catch (e) {
     console.error(`apify.store threw: ${(e as Error).message}`);
 }

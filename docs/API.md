@@ -6,10 +6,19 @@ document describes every method in detail.
 
 ## Conventions
 
-- **Every method is `async`** — `await` the result (or `for await` for
-  `dataset.iterate`).
+- **Every method is `async`** — except `dataset.listItems`/`store` (see
+  below), which are plain functions that return an already-awaitable value;
+  `await`ing one behaves identically to awaiting a true `async` call.
 - **One options object.** Each method takes a single object argument; there are
   no positional parameters.
+- **Paginated methods are dual-mode.** [`dataset.listItems`](#datasetlistitems--object-count-offset-limit-desc-)
+  and [`store`](#apifystore--object-count-offset-limit-) return a value that's
+  both a `Promise` and an `AsyncIterable`: `await` it for one page (`{ items,
+  count, offset, limit, ... }`); `for await (const item of ...)` it to
+  auto-paginate through everything, one item at a time. One call, one name,
+  two ways to consume it — matching the official
+  [`apify-client`](https://github.com/apify/apify-client-js) SDK's
+  `PaginatedIterator` convention. There's no separate "iterate" method.
 - **`actorId`** accepts either `username/name` (e.g. `apify/rag-web-browser`) or
   the Actor's ID.
 - **Return values.** The Apify API wraps most responses in a `{ "data": … }`
@@ -38,23 +47,31 @@ Apify's own API tags this endpoint `Store` — a top-level resource, not an
 Actor method — so the binding mirrors that: `apify.store(...)`, not
 `apify.actor.store(...)`.
 
-### `apify.store({ search, limit?, category? })` → `Actor[]`
+### `apify.store({ search, limit?, offset?, category? })` → `{ items, count, offset, limit }`
 
-Search the Apify Store.
+Search the Apify Store. Dual-mode — see [Conventions](#conventions).
 
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `search` | `string` | yes | Full-text search query. |
-| `limit` | `number` | no | Maximum number of results. |
+| `limit` | `number` | no | Page size (`await` mode) / items per page (`for await` mode). |
+| `offset` | `number` | no | Starting offset. |
 | `category` | `string` | no | Restrict to a Store category. |
 
-**Output:** the `data.items` array of the Store listing (the pagination wrapper
-is dropped) — i.e. an `Actor[]`.
+**Output (custom):** one page — `{ items: Actor[], count, offset, limit }`
+(`count` is this page's actual item count; `offset`/`limit` echo the request).
 **Apify API:** [`GET /v2/store`](https://docs.apify.com/api/v2/store-get)
 
 ```js
-const actors = await apify.store({ search: 'web scraper', limit: 5 });
-console.log(actors.map((a) => `${a.username}/${a.name}`).join('\n'));
+// One page
+const { items } = await apify.store({ search: 'web scraper', limit: 5 });
+console.log(items.map((a) => `${a.username}/${a.name}`).join('\n'));
+
+// Every match
+const names = [];
+for await (const actor of apify.store({ search: 'web scraper', limit: 20 })) {
+    names.push(`${actor.username}/${actor.name}`);
+}
 ```
 
 ---
@@ -234,51 +251,48 @@ Append one or more items to a dataset.
 ```js
 const ds = await apify.dataset.create();
 await apify.dataset.pushItems({ datasetId: ds.id, items: [{ a: 1 }, { a: 2 }] });
-const items = await apify.dataset.listItems({ datasetId: ds.id });
+const { items } = await apify.dataset.listItems({ datasetId: ds.id });
 ```
 
-### `dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })` → `object[]`
+### `dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })` → `{ items, count, offset, limit, desc }`
 
-Read a page of items.
+Read the dataset. Dual-mode — see [Conventions](#conventions): `await` for one
+page, `for await` to auto-paginate through everything (replaces what used to
+be a separate `iterate()` method — one name, one method, both jobs).
 
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `datasetId` | `string` | yes | Dataset ID. |
 | `fields` | `string[]` | no | Only include these fields (joined into `fields`). |
 | `omit` | `string[]` | no | Exclude these fields. |
-| `limit` | `number` | no | Page size. |
-| `offset` | `number` | no | Starting offset. |
+| `limit` | `number` | no | Page size (`await` mode) / items fetched per page (`for await` mode). Omit for the API's own default (effectively unbounded — a single `await` then returns everything in one page). |
+| `offset` | `number` | no | Starting offset. Default `0`. |
 | `clean` | `boolean` | no | Skip empty items / hidden fields (`clean=1`). |
 | `desc` | `boolean` | no | Reverse (newest first, `desc=1`). |
 
-**Output (custom):** the **items array directly** — this endpoint already
-returns a bare array (no `data`/pagination wrapper). A dataset's pagination
-total is eventually consistent right after creation, so no `total` is surfaced;
-use [`inferFields`](#datasetinferfields--schema) for a count or
-[`iterate`](#datasetiterate--asyncgeneratorobject) to consume everything.
-**Apify API:** [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get)
+**Output (custom):**
+- `await apify.dataset.listItems({...})` → one page: `{ items: object[], count,
+  offset, limit, desc }`. `offset`/`limit`/`desc` echo what the API actually
+  applied (read from its `x-apify-pagination-*` response headers, not just
+  the request); `count` is this page's actual item count. **No `total`** —
+  the API's `x-apify-pagination-total` header is unreliable for
+  freshly-created datasets (eventually consistent); use
+  [`inferFields`](#datasetinferfields--schema) for an approximate count.
+- `for await (const item of apify.dataset.listItems({...}))` → every item in
+  the dataset, one at a time, paging internally. Stops when a page comes back
+  shorter than requested (the natural end-of-data signal).
 
-### `dataset.iterate({ datasetId, fields?, omit?, clean?, desc?, batchSize? })` → `AsyncGenerator<object>`
-
-Async-iterate the **entire** dataset, paging internally so you don't manage
-offsets. Stops when a page returns fewer than `batchSize` items.
-
-| Param | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `datasetId` | `string` | yes | | Dataset ID. |
-| `fields` | `string[]` | no | | Only include these fields. |
-| `omit` | `string[]` | no | | Exclude these fields. |
-| `clean` | `boolean` | no | | Skip empty items / hidden fields. |
-| `desc` | `boolean` | no | | Reverse order. |
-| `batchSize` | `number` | no | `1000` | Items fetched per page. |
-
-**Output (custom):** an async generator yielding one item (`object`) at a time.
-**Apify API:** [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get) (paged internally)
+**Apify API:** [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get) (paged internally for `for await`)
 
 ```js
-let count = 0;
-for await (const item of apify.dataset.iterate({ datasetId })) count++;
-console.log('total items:', count);
+// One page
+const { items, count } = await apify.dataset.listItems({ datasetId, limit: 100 });
+console.log(`${count} items on this page`);
+
+// Every item
+let total = 0;
+for await (const item of apify.dataset.listItems({ datasetId })) total++;
+console.log('total items:', total);
 ```
 
 ### `dataset.inferFields({ datasetId, sample? })` → `Schema`
