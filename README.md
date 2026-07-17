@@ -15,12 +15,24 @@ search the Store, run an Actor, read its dataset, filter and aggregate the
 results — instead of sending every intermediate result back through the model
 and wasting tokens. This Actor is the sandbox that runs that script.
 
-**Best suited for data-heavy jobs** — scraping hundreds or thousands of
-places/items via an Actor, then filtering, sorting, or aggregating them
-locally before returning a small summary. **Weaker fit** for steps that
-require reading or judging free text (picking a fact out of an article,
-choosing a search term) — keep the model in the loop there instead; a wrong
-guess inside the sandbox fails silently until the whole script finishes.
+**Worth it only for bulk work**, measured empirically (A/B eval, tokens/duration
+vs. calling Actor tools directly):
+
+- **Filtering/sorting/aggregating ~50+ dataset records** in one dataset —
+  modest win (~20-35% less time, ~20% fewer tokens at 100 records).
+- **Fanning out over ~10+ sub-resources with a sizeable payload each**
+  (e.g. visiting many pages, chaining Actor outputs) — decisive win even at
+  small counts, since every skipped round trip avoids funneling a whole raw
+  page/document through the model (~60% less time, ~75% fewer tokens at 20
+  places × 20 page fetches).
+- **Below ~10 items with no fan-out** (a single small lookup) — **don't use
+  this Actor**. The sandbox's own round-trip overhead (~20K tokens) isn't
+  paid back; a direct Actor call is both faster and cheaper.
+
+**Weaker fit** for steps that require reading or judging free text (picking a
+fact out of an article, choosing a search term) — keep the model in the loop
+there instead; a wrong guess inside the sandbox fails silently until the
+whole script finishes.
 
 ## Calling this Actor
 
