@@ -7,13 +7,12 @@
 ## What it does
 
 Executes one JS script that an AI agent submits through the Apify MCP
-Server's **Code Mode**, then returns whatever the script printed. JS only —
-a TypeScript annotation is a SyntaxError at load, nothing transpiles it.
+Server, then returns whatever the script printed.
 
-Code Mode lets an agent do many Apify operations in **one call** — search
-the Store, run an Actor, read its dataset, filter and aggregate — instead of
-sending every intermediate result back through the model. This Actor is the
-sandbox that runs that script.
+Lets an agent do many Apify operations in **one call** — search the Store,
+run an Actor, read its dataset, filter and aggregate — instead of sending
+every intermediate result back through the model. This Actor is the sandbox
+that runs that script.
 
 **Worth it only for bulk work** (measured, A/B eval vs. calling Actor tools
 directly):
@@ -23,7 +22,6 @@ directly):
 | Filter/sort/aggregate 50+ dataset records | Modest win — ~20-35% less time, ~20% fewer tokens |
 | Fan out over 10+ sub-resources with a sizeable payload each (visit many pages, chain Actors) | Decisive win — ~60% less time, ~75% fewer tokens |
 | Under 10 items, no fan-out | **Don't use this Actor** — ~20K-token sandbox overhead isn't paid back |
-| Reading/judging free text (pick a fact, choose a search term) | Keep the model in the loop — a wrong guess fails silently until the script ends |
 
 ## Calling this Actor
 
@@ -34,11 +32,6 @@ default tools:
 ```
 call-actor({ actor: "apify/code-runtime", input: { code: "..." } })
 ```
-
-Or via the raw API: `POST /v2/acts/apify~code-runtime/runs` with `{ code }`
-as the body. Results land in the run's default dataset, same as any Actor
-call — follow the response's `nextStep` (or call `get-dataset-items`/
-`GET /v2/datasets/{datasetId}/items`) to read it.
 
 Default `timeoutSecs: 900`, `memoryMbytes: 1024` (`.actor/actor.json`) —
 override per call for scripts chaining several long Actor runs (MCP
@@ -218,4 +211,3 @@ apify.keyValueStore.list({ storeId, limit?, exclusiveStartKey? })  // → { item
 ## Learn more
 
 - Apify MCP Server: <https://mcp.apify.com>
-- Code Mode design: [apify/apify-mcp-server#794](https://github.com/apify/apify-mcp-server/pull/794)
