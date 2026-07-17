@@ -54,10 +54,12 @@ call — follow the response's `nextStep` (or call `get-dataset-items`/
 - Before running an Actor from your script, call `apify.actor.get({ actorId })`
   once to read its input/output schema.
 - As each nested run finishes, log its `run.id` / `defaultDatasetId` /
-  `defaultKeyValueStoreId` **before** processing its output — if the script
-  then throws, a re-run can read those existing storages instead of paying to
-  re-run the Actor (nothing persists between this Actor's own runs, but the
-  Actors it started keep their results).
+  `defaultKeyValueStoreId` **before** processing its output (nothing persists
+  between this Actor's own runs, but the Actors it started keep their
+  results). **If a prior attempt's `defaultDatasetId`/`defaultKeyValueStoreId`
+  is visible in your own earlier turns, reuse it — do not re-run the same
+  Actor call with identical input.** Re-running wastes the compute/cost of a
+  call that already succeeded.
 - Print a small, JSON-stringified summary of the result — never dump full
   datasets. Only what you `console.log`/`console.info` comes back; a
   top-level `return` value is **not** captured.
@@ -206,12 +208,12 @@ apify.store({ search, limit?, category? })                  // → actors[]
 // Actors
 apify.actor.get({ actorId })                                  // → actor
 apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
-apify.actor.call({ actorId, ...startOpts, waitForFinishSecs = 60 })           // → run (waits)
+apify.actor.call({ actorId, ...startOpts, waitForFinishSecs = 60 })           // → run (waits; may return non-terminal READY/RUNNING if the 60s cap elapses first — not an error, poll run.waitForFinish)
 apify.actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }
 
 // Runs
 apify.run.get({ runId })                                    // → run
-apify.run.waitForFinish({ runId, waitForFinishSecs = 60 })  // → run
+apify.run.waitForFinish({ runId, waitForFinishSecs = 60 })  // → run (same non-terminal caveat as actor.call above)
 apify.run.abort({ runId })                                  // → run
 apify.run.getLog({ runId, limit? })                         // → string
 

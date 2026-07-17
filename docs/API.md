@@ -25,6 +25,10 @@ document describes every method in detail.
   [`keyValueStore.get`](#keyvaluestoreget--value--null), which returns `null` for a missing key.
 - **Network.** Outbound `fetch` from your script is restricted to `apify.com`
   and its subdomains.
+- **Reuse, don't re-run.** If a prior attempt already logged a nested run's
+  `defaultDatasetId`/`defaultKeyValueStoreId` (visible in your own earlier
+  turns), reuse it — do not re-run the same Actor call with identical input.
+  Re-running wastes the compute/cost of a call that already succeeded.
 
 ---
 
@@ -103,6 +107,10 @@ elapses), then return the run record.
 **Output:** the Run object (unwrapped `data`), exposing `defaultDatasetId` and
 `defaultKeyValueStoreId` for reading results. Uses the standard run endpoint
 (not `/run-sync`, which returns the output record instead of the run object).
+**May return non-terminal** (`status: 'READY'`/`'RUNNING'`) if `waitForFinishSecs`
+(capped at 60s by the API) elapses before the run finishes — this is **not**
+an error; poll [`run.waitForFinish`](#runwaitforfinish--run) until `status` is
+terminal (`SUCCEEDED`/`FAILED`/`ABORTED`/`TIMED-OUT`).
 **Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
 
 ### `actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })` → `{ run, items }`
@@ -164,7 +172,11 @@ first, then return the run record.
 | `runId` | `string` | yes | | The run ID. |
 | `waitForFinishSecs` | `number` | no | `60` | Seconds to wait (`waitForFinish`). **Capped at 60s by the API**; poll in a loop for longer runs. |
 
-**Output:** the Run object (unwrapped `data`).
+**Output:** the Run object (unwrapped `data`). **May return non-terminal**
+(`status: 'READY'`/`'RUNNING'`) if the cap elapses first — this is **not** an
+error, it means keep polling; check `status` against the terminal set
+(`SUCCEEDED`/`FAILED`/`ABORTED`/`TIMED-OUT`) before treating any other value
+as a failure.
 **Apify API:** [`GET /v2/actor-runs/{runId}`](https://docs.apify.com/api/v2/actor-run-get)
 
 ### `run.abort({ runId })` → `Run`
