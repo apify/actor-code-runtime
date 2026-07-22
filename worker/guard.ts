@@ -3,7 +3,7 @@
 // runs at module-evaluation time. Our own Apify API calls use the real,
 // unrestricted fetch (the internal API is a private IP, not *.apify.com) —
 // see claimRealFetch() below for how runner.js gets it without leaving it
-// reachable from user code.
+// usable by user code.
 //
 // Egress surface (workerd, no nodejs_compat): the only JS-reachable outbound
 // primitives are fetch, WebSocket, and EventSource. Raw sockets (node:net,
@@ -15,16 +15,42 @@
 
 const realFetch = globalThis.fetch.bind(globalThis);
 
-// One-shot handoff of the unrestricted fetch to runner.js. ES modules are
-// evaluated once and cached, so `guard.js` is the same module instance no
-// matter who imports it. runner.js imports this module (and calls
-// claimRealFetch()) before usercode.js is ever imported, so it always claims
-// first. If the sandboxed script later does `await import('./guard.js')` to
-// try to recover the unrestricted fetch, it gets this same cached instance —
-// but the value is already gone. A standing `export { realFetch }` would hand
-// it to that later import too; don't reintroduce one.
+// One-shot handoff of the unrestricted fetch to runner.js — gated on genuine
+// request handling, not on import order between guard.js and usercode.js.
+//
+// entrypoint.sh splices the `code` input verbatim (no escaping) into
+// `export async function run(apify, console) { <code> }`. A bare `}` in
+// `code` closes that function early; everything after it runs as ordinary
+// MODULE-SCOPE code in usercode.js, executed during module evaluation —
+// i.e. unconditionally, before workerd ever calls this worker's own
+// `fetch(request, env)` handler. That escaped code can `await
+// import('./guard.js')` and call claimRealFetch() itself.
+//
+// This module previously assumed import order made runner.js's own claim run
+// first (guard.js has no dependency on usercode.js, so it evaluates before
+// it) — that protects nothing here, because it's usercode.js's top-level code
+// racing runner.ts's top-level code, and usercode.js is the import evaluated
+// immediately before runner.ts's own body runs. Verified live (PR #1 review,
+// 2026-07-21): a `code` input using the escape above reliably wins that race,
+// so runner.ts's own claim got null and threw, crashing the whole Actor run.
+//
+// The actual invariant that holds regardless of any module-graph ordering:
+// usercode.js's module scope never runs *inside* a `fetch(request, env)`
+// call — module evaluation always finishes before workerd dispatches the
+// first request. So claimRealFetch() refuses to hand anything out until
+// markRequestHandlingStarted() has been called; runner.ts calls it (and
+// claims) as the first, synchronous statement of its `/run` handling, before
+// any `await`, so no attacker-scheduled microtask can race it either. A claim
+// attempted before that (legitimate or injected) gets null without consuming
+// the resource, so the real claim still succeeds afterward.
+let requestHandlingStarted = false;
+export function markRequestHandlingStarted(): void {
+    requestHandlingStarted = true;
+}
+
 let unclaimedRealFetch: typeof realFetch | null = realFetch;
 export function claimRealFetch(): typeof realFetch | null {
+    if (!requestHandlingStarted) return null; // too early to be a trusted caller
     const fetchFn = unclaimedRealFetch;
     unclaimedRealFetch = null;
     return fetchFn;

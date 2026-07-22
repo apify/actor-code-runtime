@@ -7,26 +7,31 @@
 // Single-tenant: one run = one container = one program = one token. No Worker
 // Loader / per-request isolate is needed — the program runs in this worker,
 // which is itself the sandbox (no filesystem, restricted outbound network).
-// guard.js must be imported before usercode.js: it overrides globalThis.fetch
-// to allow only apify.com, and hands us the real, unrestricted fetch via a
-// one-shot claimRealFetch() for our own (internal) API calls — see guard.js
-// for why this is a claim, not a standing export.
-import { claimRealFetch } from './guard.js';
+// guard.js overrides globalThis.fetch to allow only apify.com, and hands us
+// the real, unrestricted fetch via a one-shot claimRealFetch() for our own
+// (internal) API calls. That claim is gated on markRequestHandlingStarted()
+// (called below, first thing in the `fetch` handler's `/run` path), not on
+// import order — usercode.js's module scope can run attacker-controlled code
+// before this module's own top-level code does, so the claim must not
+// happen at this module's top level either. See guard.ts's comment on
+// claimRealFetch for the full reasoning.
+import { claimRealFetch, markRequestHandlingStarted } from './guard.js';
 import { run } from './usercode.js';
 
-// Must run before usercode.js's `run()` is ever invoked (it does, here — module
-// evaluation order puts this ahead of any dynamic import from inside `run()`).
-// Factored into a function (rather than a bare `const` + `if (!x) throw`) so the
-// non-null guarantee is encoded in the return type once, here — TS doesn't carry
-// a narrowed-from-null check across the later function declarations that close
-// over `realFetch`, but a return type with the `null` branch already thrown away
-// needs no further narrowing anywhere downstream.
+// Called as the first, synchronous statement of the `/run` path in the
+// `fetch` handler below — before any `await`, so no attacker-scheduled
+// microtask from usercode.js's module scope can call claimRealFetch() in
+// between. See guard.ts.
 function requireRealFetch(): typeof globalThis.fetch {
     const fetchFn = claimRealFetch();
-    if (!fetchFn) throw new Error('realFetch already claimed — guard.js imported out of order.');
+    if (!fetchFn) throw new Error('realFetch already claimed.');
     return fetchFn;
 }
-const realFetch = requireRealFetch();
+// Assigned inside the `fetch` handler's `/run` path (the only call path into
+// the functions below) before any of them run — definite-assignment
+// asserted rather than left `| undefined` so call sites here don't need
+// null checks.
+let realFetch!: typeof globalThis.fetch;
 
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
 
@@ -539,6 +544,11 @@ export default {
         const url = new URL(request.url);
         if (url.pathname === '/health') return new Response('ok');
         if (url.pathname !== '/run') return new Response('Not found', { status: 404 });
+
+        // First, synchronous statements of the /run path — see guard.ts and the
+        // requireRealFetch comment above for why this can't happen any earlier.
+        markRequestHandlingStarted();
+        realFetch = requireRealFetch();
 
         const token = env.APIFY_TOKEN;
         if (!token) throw new Error('APIFY_TOKEN missing from Actor run environment.');

@@ -40,3 +40,21 @@ done
 
 [ "$failed" -eq 0 ] || { echo "==> some probes FAILED" >&2; exit 1; }
 echo "==> all probes passed"
+
+# Regression probe for the realFetch claim-ordering bug (PR #1 review,
+# 2026-07-21): tests/fixtures/realfetch-escape.js escapes usercode.js's
+# wrapper into module scope and tries to steal the internal-only realFetch
+# before runner.ts's own claim. It has no captured console to report through
+# (see the file's own comment), so success/failure is the Actor run itself
+# succeeding vs. failing -- not a printed sentinel like the probes above.
+echo "==> apify call: tests/fixtures/realfetch-escape.js (regression: realFetch claim ordering)"
+jq -n --arg code "$(cat tests/fixtures/realfetch-escape.js)" '{ code: $code }' > "$input_json"
+if apify call -f "$input_json" -o; then
+    echo "==> realfetch-escape passed (run succeeded — module-scope steal attempt did not hijack/crash the internal claim)"
+else
+    echo "==> realfetch-escape FAILED (run crashed — realFetch claim-ordering regression, see guard.ts's requestHandlingStarted gate)" >&2
+    failed=1
+fi
+
+[ "$failed" -eq 0 ] || { echo "==> some probes FAILED" >&2; exit 1; }
+echo "==> all probes (including regressions) passed"
