@@ -31,6 +31,27 @@
 // no longer needs to capture or export a privileged fetch at all.
 const realFetch = globalThis.fetch.bind(globalThis);
 
+// Captured before usercode.js's module body ever runs (see runner.ts's import-order
+// comment — guard.js's own top-level code, including this line, always finishes first).
+// `new URL(...)` and `instanceof URL` below resolve the identifier `URL` from scope, which
+// is just `globalThis.URL` — an ordinary, reassignable global. A script that replaces it
+// (`globalThis.URL = class FakeURL extends URL { get hostname() { return 'apify.com'; } }`)
+// would make every validation call below trust a lying parser while the *string* actually
+// handed to realFetch is untouched, defeating the allowlist with no module-scope-escape
+// trick needed at all — this file's own `Object.defineProperty(globalThis, 'fetch', ...)`
+// below is exactly this same "capture the real one before a script can swap it" pattern,
+// applied here to the other builtin this file's security check depends on.
+const RealURL = globalThis.URL;
+
+// Same capture-before-usercode-runs reasoning, for a different consumer: runner.ts's own
+// `Object.freeze(...)` calls (on the `apify` binding, `console`, and its default export) are
+// top-level code that runs AFTER usercode.js's module body (see runner.ts's import-order
+// comment), so escaped top-level code could reassign the global `Object.freeze` to a no-op
+// before runner.ts ever calls it — silently defeating every "frozen so the script can't
+// reassign this" guarantee there. Exporting a pre-captured reference is safe (it's still
+// just Object.freeze; the concept itself carries no capability) and closes that gap.
+export const realObjectFreeze: typeof Object.freeze = Object.freeze.bind(Object);
+
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
 // (ends with `.evil.com`) both fail.
@@ -41,7 +62,7 @@ export function isAllowedHost(hostname: string): boolean {
 
 function requestUrl(input: RequestInfo | URL): string {
     if (typeof input === 'string') return input;
-    if (input instanceof URL) return input.href;
+    if (input instanceof RealURL) return input.href;
     if (input && typeof input.url === 'string') return input.url; // Request
     return String(input);
 }
@@ -52,8 +73,9 @@ export function validateUrl(input: RequestInfo | URL): URL {
     let url: URL;
     try {
         // Parse to the real host — defeats userinfo (`apify.com@evil.com`),
-        // path/query/fragment (`evil.com/apify.com`) and similar tricks.
-        url = new URL(requestUrl(input));
+        // path/query/fragment (`evil.com/apify.com`) and similar tricks. Uses RealURL
+        // (see above), not the bare global, so a hijacked globalThis.URL can't lie here.
+        url = new RealURL(requestUrl(input));
     } catch {
         throw new Error('Blocked fetch: only absolute http(s) URLs to apify.com are allowed');
     }
@@ -94,7 +116,7 @@ async function guardedFetchHop(input: RequestInfo | URL, init: RequestInit | und
     if (!REDIRECT_STATUSES.has(response.status)) return response;
     const location = response.headers.get('location');
     if (!location) return response; // redirect status with no Location: nothing to follow
-    const nextUrl = new URL(location, url); // resolves a relative Location against the current URL
+    const nextUrl = new RealURL(location, url); // resolves a relative Location against the current URL
     return guardedFetchHop(nextUrl.href, nextRedirectInit(init, response.status), hop + 1);
 }
 

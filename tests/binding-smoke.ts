@@ -26,7 +26,7 @@ const ACTOR = 'apify/hello-world';
 const [ACTOR_USERNAME, ACTOR_NAME] = ACTOR.split('/');
 
 // Every status the Apify API can return for a run. Used to check a returned status is a
-// real value, not just any truthy string -- mirrors TERMINAL_STATUSES in worker/runner.ts.
+// real value, not just any truthy string -- mirrors DONE_TRACKING_STATUSES in worker/runner.ts.
 const RUN_STATUSES = new Set(['READY', 'RUNNING', 'SUCCEEDED', 'FAILED', 'ABORTING', 'ABORTED', 'TIMING-OUT', 'TIMED-OUT']);
 
 // ---- actor (read) ----

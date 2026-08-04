@@ -31,7 +31,7 @@
             "maxTotalChargeUsd": {
                 "title": "Max total charge (USD)",
                 "type": "number",
-                "description": "Execution-wide spending budget across every Actor run this script starts — distinct from a single call's own maxTotalChargeUsd, which only caps that one run. Each run's own cap is clamped so the combined total never exceeds this budget; starting a run once it's exhausted throws inside the script. Omit for no limit. Must be greater than 0 — to allow zero Actor runs, omit the code's actor.start/call/callAndGetItems calls instead.",
+                "description": "Execution-wide spending budget across every Actor run this script starts — distinct from a single call's own maxTotalChargeUsd, which only caps that one run. Each run's own cap is clamped so the combined total never exceeds this budget; starting a run once it's exhausted throws inside the script. Omit for no limit.",
                 "exclusiveMinimum": 0
             },
             "defaultTimeoutSecs": {

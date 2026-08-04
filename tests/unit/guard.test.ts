@@ -191,10 +191,33 @@ describe('module exports', () => {
     it('never exports a raw/unrestricted fetch capability', () => {
         // Regression guard for PR #1's finding: guard.js must never export anything that
         // hands the caller an unwrapped fetch function or a way to bypass the allowlist.
-        // Every export must be one of these known-safe, pure helpers.
-        const knownSafeExports = new Set(['isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch']);
+        // Every export must be one of these known-safe, pure helpers (realObjectFreeze is
+        // safe by the same reasoning: it's still just Object.freeze, the concept carries no
+        // capability — see its own comment in guard.ts for why it needs to be exported at all).
+        const knownSafeExports = new Set(['isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch', 'realObjectFreeze']);
         for (const key of Object.keys(guard)) {
             expect(knownSafeExports.has(key)).toBe(true);
+        }
+    });
+});
+
+describe('validateUrl resists a hijacked global URL constructor', () => {
+    // Regression test for a real bypass found in review: validateUrl used to call the bare
+    // `new URL(...)`, which resolves whatever `globalThis.URL` currently is. A script that
+    // replaces it with a lying implementation (real .href, faked .hostname) could make
+    // validateUrl believe a disallowed host was apify.com, with no module-scope-escape trick
+    // needed at all — see guard.ts's RealURL comment for the fix (capture URL before
+    // usercode.js can ever run).
+    it('still rejects a disallowed host after globalThis.URL is replaced with a lying constructor', () => {
+        const OriginalURL = globalThis.URL;
+        class LyingURL extends OriginalURL {
+            get hostname() { return 'apify.com'; }
+        }
+        globalThis.URL = LyingURL;
+        try {
+            expect(() => guard.validateUrl('http://example.com/')).toThrow(/only apify\.com/);
+        } finally {
+            globalThis.URL = OriginalURL;
         }
     });
 });

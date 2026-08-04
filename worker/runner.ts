@@ -22,17 +22,23 @@
 // sound: usercode.js shares guard.js's module graph, so any function guard.js
 // exported was equally callable by escaped user code.
 //
-// guard.js is a side-effect import — nothing here binds a name from it — but it MUST be
-// the first import in this file. Import declarations are hoisted and dependencies
-// evaluate in the order first encountered; guard.js has to install its fetch/WebSocket/
-// EventSource overrides before usercode.js's module body runs, including any
-// attacker-controlled top-level statement that escapes usercode.js's wrapper (see
-// entrypoint.sh). Reversing this order (or dropping the import) silently makes the
-// entire allowlist dead code — `globalThis.fetch` stays the real, unrestricted fetch for
-// every script this Actor runs. tests/sandbox-isolation.ts is the regression test for
-// this: it fails loudly (`allow https://example.com/` check reports NOT blocked) if this
-// import is ever missing or reordered.
-import './guard.js';
+// guard.js MUST be the first import in this file, whether or not a name is bound from it.
+// Import declarations are hoisted and dependencies evaluate in the order first
+// encountered; guard.js has to install its fetch/WebSocket/EventSource overrides (and
+// capture RealURL/realObjectFreeze — see guard.ts) before usercode.js's module body runs,
+// including any attacker-controlled top-level statement that escapes usercode.js's
+// wrapper (see entrypoint.sh). Reversing this order (or dropping the import) silently
+// makes the entire allowlist dead code — `globalThis.fetch` stays the real, unrestricted
+// fetch for every script this Actor runs. tests/sandbox-isolation.ts is the regression
+// test for this: it fails loudly (`allow https://example.com/` check reports NOT blocked)
+// if this import is ever missing or reordered.
+//
+// realObjectFreeze (used below instead of the bare global `Object.freeze`) is guard.js's
+// own pre-captured reference, for the same reason: this file's Object.freeze calls are
+// top-level code that runs AFTER usercode.js's module body, so a script could otherwise
+// shadow the global `Object.freeze` to a no-op before any of them ever run. See guard.ts's
+// comment on realObjectFreeze.
+import { realObjectFreeze } from './guard.js';
 import { run } from './usercode.js';
 
 type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
@@ -351,8 +357,11 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     // handed or guesses. Also used by abortTrackedRuns() (called from the top-level exception
     // handler below) to clean up runs still going when the script itself crashed.
     const startedRunIds = new Set<string>();
-    // Statuses after which abortTrackedRuns() (below) should NOT attempt to abort a run again.
-    // Deliberately broader than the API's own terminal-status set (docs/API.md's
+    // Gates nonTerminalRunIds membership: createRun() (below) adds a run's id here unless its
+    // status is already one of these; waitForFinish() removes it once the status becomes one
+    // of these. A status in this set means this script no longer needs to track (and
+    // therefore abortTrackedRuns(), below, no longer needs to abort) that run. Deliberately
+    // broader than the API's own terminal-status set (docs/API.md's
     // SUCCEEDED/FAILED/ABORTED/TIMED-OUT) by one: ABORTING means a run is already mid-abort
     // (e.g. this script already called run.abort() on it), so re-aborting it would just be a
     // redundant API call, not a real cleanup action.
@@ -379,6 +388,15 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     const createRun = async ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }: StartOptions): Promise<RunRecord> => {
         if (limits.maxActorRuns !== undefined && reservedRunCount >= limits.maxActorRuns) {
             throw new Error(`Blocked actor run: this script already started/is starting ${reservedRunCount} Actor run(s), the configured limit is ${limits.maxActorRuns}`);
+        }
+        // Reject a malformed script-supplied maxTotalChargeUsd before it ever reaches
+        // committedChargeUsd's arithmetic below: NaN in particular is silently absorbing —
+        // `NaN - anything` and `anything - NaN` both stay NaN, so a single bad call would
+        // permanently corrupt the running total and (since `NaN <= 0` is false) defeat the
+        // whole execution-level budget check for the rest of the script, with no way to
+        // recover it via the catch block's rollback (subtracting NaN from NaN is still NaN).
+        if (maxTotalChargeUsd !== undefined && !(Number.isFinite(maxTotalChargeUsd) && maxTotalChargeUsd > 0)) {
+            throw new Error(`Invalid maxTotalChargeUsd: ${maxTotalChargeUsd} (must be a finite number greater than 0)`);
         }
         let effectiveMaxCharge = maxTotalChargeUsd;
         if (limits.maxTotalChargeUsd !== undefined) {
@@ -625,12 +643,12 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
 
     // Freeze every namespace (and the wrapper) so the script can't reassign a method to
     // corrupt its own behavior or, for `console` below, its own output capture.
-    const binding = Object.freeze({
-        actor: Object.freeze(actor),
+    const binding = realObjectFreeze({
+        actor: realObjectFreeze(actor),
         store,
-        run: Object.freeze(run),
-        dataset: Object.freeze(dataset),
-        keyValueStore: Object.freeze(keyValueStore),
+        run: realObjectFreeze(run),
+        dataset: realObjectFreeze(dataset),
+        keyValueStore: realObjectFreeze(keyValueStore),
     });
     return { binding, abortTrackedRuns };
 }
@@ -674,7 +692,7 @@ function parsePositiveNumberEnv(value: string | undefined): number | undefined {
 // `import('./runner.js')`, the same reachability every export in this file has — see guard.ts's
 // header comment) can't reassign `.fetch` to a wrapper that captures the real `request`/`env`
 // (APIFY_TOKEN, INTERNAL_API) the next time workerd genuinely dispatches to this worker.
-export default Object.freeze({
+export default realObjectFreeze({
     async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
         if (url.pathname === '/health') return new Response('ok');
@@ -695,7 +713,7 @@ export default Object.freeze({
         const stdout: string[] = [];
         const stderr: string[] = [];
         // Frozen so the script can't reassign e.g. console.log to corrupt its own capture.
-        const captureConsole: ConsoleLike = Object.freeze({
+        const captureConsole: ConsoleLike = realObjectFreeze({
             log:   (...args: unknown[]) => stdout.push(args.map(stringify).join(' ')),
             error: (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),
             warn:  (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),

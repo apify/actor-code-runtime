@@ -27,24 +27,13 @@ describe('guard.js is actually enforced (not just correct in isolation)', () => 
         expect(result.pushedItem?.stdout).not.toMatch(/LEAK/);
     });
 
-    it('allows a fetch to an apify.com host', async () => {
-        // The Actor's own internal-API mock isn't apify.com, so this only proves the guard's
-        // ALLOW path is reachable (doesn't hang/throw before even trying) — the mock returns a
-        // real HTTP response for any host once workerd's own DNS/connect succeeds, which for
-        // a host that doesn't resolve (apify.com does, publicly) would time out instead of
-        // throwing a "Blocked fetch" error. Asserting the ABSENCE of the guard's own blocked-
-        // fetch error message is what distinguishes "guard let it through" from "guard blocked
-        // it" here, without depending on live internet access from the test runner.
-        const result = await runScript(`
-            try {
-                await fetch('https://apify.com/');
-                console.log('reached apify.com (no guard rejection)');
-            } catch (e) {
-                console.log('error: ' + e.message);
-            }
-        `);
-        expect(result.pushedItem?.stdout).not.toMatch(/Blocked fetch/);
-    });
+    // The allow-path (a request TO apify.com actually going through) is deliberately NOT
+    // covered here: it would require either live internet access from the test runner (flaky,
+    // and not actually offline despite this suite's other claims) or mocking DNS/TLS for a real
+    // host, neither of which this harness does. tests/unit/guard.test.ts's "performs the
+    // request when the URL is allowed" case covers that path fully offline, against a mocked
+    // fetch — this file only needs to prove the DISALLOW path is wired into the real worker
+    // (see the previous test), which is the part a unit test can't reach.
 
     it('blocks WebSocket construction', async () => {
         const result = await runScript(`
@@ -120,6 +109,32 @@ describe('execution-limit safeguards fire under real (including concurrent) use'
         `, { inputFields: { defaultTimeoutSecs: 42 } });
         const runCreateRequest = result.mockApi.requests.find((r) => r.method === 'POST' && r.path.includes('/acts/'));
         expect(runCreateRequest?.path).toMatch(/timeout=42/);
+    });
+
+    it('a rejected actor.start() releases its reservation (rollback actually fires)', async () => {
+        // Regression test for createRun()'s try/catch rollback: without it, a run that fails
+        // AFTER being synchronously reserved (bad actorId, API rejection, ...) would
+        // permanently eat into maxActorRuns's budget for a run that never actually started.
+        const result = await runScript(`
+            let firstFailed = false;
+            try {
+                await apify.actor.start({ actorId: 'apify/hello-world' });
+            } catch (e) {
+                firstFailed = true;
+            }
+            // If the failed attempt above wasn't rolled back, this would be blocked too
+            // (maxActorRuns: 1 already "spent" by the failed one).
+            let secondSucceeded = false;
+            try {
+                await apify.actor.start({ actorId: 'apify/hello-world' });
+                secondSucceeded = true;
+            } catch (e) { /* would mean rollback didn't happen */ }
+            console.log('firstFailed=' + firstFailed + ' secondSucceeded=' + secondSucceeded);
+        `, {
+            inputFields: { maxActorRuns: 1 },
+            beforeStart: (mockApi) => mockApi.failNextRunCreate(400, JSON.stringify({ error: { message: 'bad actorId' } })),
+        });
+        expect(result.pushedItem?.stdout).toBe('firstFailed=true secondSucceeded=true');
     });
 
     it('actor.callAndGetItems does not double-count against maxActorRuns', async () => {
