@@ -33,13 +33,19 @@
 // test for this: it fails loudly (`allow https://example.com/` check reports NOT blocked)
 // if this import is ever missing or reordered.
 //
-// realObjectFreeze/setHas/numberIsFinite/mathMin below are guard.js's own pre-captured
-// builtin references (see the capture block at the top of guard.ts for the full reasoning):
-// this file's own top-level code, and every function it defines, run AFTER usercode.js's
-// module body (import order), so a script can shadow/poison any of these globals — or their
-// prototypes — before this file ever uses them, unless it uses guard.js's captured
-// equivalents instead of calling them bare.
-import { realObjectFreeze, setHas, numberIsFinite, mathMin } from './guard.js';
+// Everything imported below is one of guard.js's own pre-captured builtin references (see
+// the capture block at the top of guard.ts for the full reasoning): this file's own
+// top-level code, and every function it defines, run AFTER usercode.js's module body
+// (import order), so a script can shadow/poison any of these globals — or their prototypes/
+// accessors — before this file ever uses them, unless it uses guard.js's captured
+// equivalents instead of calling them bare. This is exhaustive: every builtin this file's
+// own security decisions (redirect/ownership/budget checks) or its internal-API request
+// construction (URL building, path-segment escaping, request/response bodies) depends on is
+// imported from here, never called bare.
+import {
+    realObjectFreeze, setHas, numberIsFinite, mathMin, realNumber,
+    encodeUriComponent, jsonStringify, responseOk, RealURL,
+} from './guard.js';
 import { run } from './usercode.js';
 
 type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
@@ -312,7 +318,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
 
     // Build a URL with optional query params; null/undefined values are dropped.
     const buildUrl = (path: string, searchParams?: SearchParams): URL => {
-        const url = new URL(`${apiV2}${path}`);
+        const url = new RealURL(`${apiV2}${path}`);
         if (searchParams) {
             for (const [key, value] of Object.entries(searchParams)) {
                 if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
@@ -335,12 +341,12 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
                 requestBody = body as BodyInit;
                 headers['content-type'] = contentType ?? 'application/octet-stream';
             } else {
-                requestBody = JSON.stringify(body);
+                requestBody = jsonStringify(body);
                 headers['content-type'] = contentType ?? 'application/json';
             }
         }
         const response = await internalFetch(buildUrl(path, searchParams), { method, headers, body: requestBody });
-        if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
+        if (!responseOk(response)) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
         return response;
     };
 
@@ -415,7 +421,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         reservedRunCount += 1;
         if (effectiveMaxCharge !== undefined) committedChargeUsd += effectiveMaxCharge;
         try {
-            const runRecord: RunRecord = await apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
+            const runRecord: RunRecord = await apiData('POST', `/acts/${encodeUriComponent(actorId)}/runs`, {
                 searchParams: {
                     waitForFinish: waitForFinishSecs,
                     memory: memoryMbytes,
@@ -440,7 +446,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
 
     const actor = {
         get: ({ actorId }: ActorIdOptions): Promise<ApifyRecord> =>
-            apiData('GET', `/acts/${encodeURIComponent(actorId)}`),
+            apiData('GET', `/acts/${encodeUriComponent(actorId)}`),
 
         // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
         // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
@@ -469,12 +475,12 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
 
     const run = {
         get: ({ runId }: RunIdOptions): Promise<RunRecord> =>
-            apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`),
+            apiData('GET', `/actor-runs/${encodeUriComponent(runId)}`),
 
         // Block until the run terminates or `waitForFinishSecs` elapses (whichever comes first).
         // The Apify API caps this at 60s per request; longer waits require a polling loop.
         waitForFinish: async ({ runId, waitForFinishSecs = DEFAULT_WAIT_FOR_FINISH_SECS }: WaitOptions): Promise<RunRecord> => {
-            const runRecord: RunRecord = await apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
+            const runRecord: RunRecord = await apiData('GET', `/actor-runs/${encodeUriComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
             });
             if (setHas(DONE_TRACKING_STATUSES, runRecord.status)) nonTerminalRunIds.delete(runId);
@@ -489,13 +495,13 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
                 throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
             }
             nonTerminalRunIds.delete(runId);
-            return apiData('POST', `/actor-runs/${encodeURIComponent(runId)}/abort`);
+            return apiData('POST', `/actor-runs/${encodeUriComponent(runId)}/abort`);
         },
 
         // Returns the full run log as text. `limit` tails the last N characters; the Apify API
         // does not paginate logs, so this is a client-side slice (the full body is fetched).
         getLog: async ({ runId, limit }: GetLogOptions): Promise<string> => {
-            const response = await apiCall('GET', `/logs/${encodeURIComponent(runId)}`);
+            const response = await apiCall('GET', `/logs/${encodeUriComponent(runId)}`);
             const text = await response.text();
             return limit && text.length > limit ? text.slice(-limit) : text;
         },
@@ -512,7 +518,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         // count) is what you want instead. Use `inferFields` if you need an approximate total.
         listItems: ({ datasetId, fields, omit, limit, offset = 0, clean, desc }: DatasetListOptions): PaginatedItems<DatasetItemsPage> => {
             const fetchPage = async (pageOffset: number, pageLimit?: number): Promise<DatasetItemsPage> => {
-                const response = await apiCall('GET', `/datasets/${encodeURIComponent(datasetId)}/items`, {
+                const response = await apiCall('GET', `/datasets/${encodeUriComponent(datasetId)}/items`, {
                     searchParams: {
                         fields: fields?.join(','),
                         omit: omit?.join(','),
@@ -538,7 +544,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         // Named inferFields (not getSchema) to avoid colliding with the Actor's own *declared*
         // dataset schema (a different concept, described in this Actor's own actor.json).
         inferFields: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
-            const meta = await apiData('GET', `/datasets/${encodeURIComponent(datasetId)}`);
+            const meta = await apiData('GET', `/datasets/${encodeUriComponent(datasetId)}`);
             const { items } = await dataset.listItems({ datasetId, limit: sample });
             const fields = new Map<string, Set<string>>();
             for (const item of items) {
@@ -563,7 +569,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             apiData('POST', '/datasets', { searchParams: { name } }),
 
         pushItems: async ({ datasetId, items }: PushItemsOptions): Promise<void> => {
-            await apiCall('POST', `/datasets/${encodeURIComponent(datasetId)}/items`, { body: items });
+            await apiCall('POST', `/datasets/${encodeUriComponent(datasetId)}/items`, { body: items });
         },
     };
 
@@ -572,11 +578,11 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         // Returns null when the key does not exist (404), not an error — this matches the common
         // "lookup or default" pattern in code.
         get: async ({ storeId, key }: KeyValueStoreGetOptions): Promise<unknown> => {
-            const response = await internalFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
+            const response = await internalFetch(buildUrl(`/key-value-stores/${encodeUriComponent(storeId)}/records/${encodeUriComponent(key)}`), {
                 headers: baseHeaders,
             });
             if (response.status === 404) return null;
-            if (!response.ok) throw new Error(`GET keyValueStore.get failed: ${response.status} ${await response.text()}`);
+            if (!responseOk(response)) throw new Error(`GET keyValueStore.get failed: ${response.status} ${await response.text()}`);
             const contentType = response.headers.get('content-type') ?? '';
             if (contentType.includes('application/json')) return response.json();
             if (contentType.startsWith('text/')) return response.text();
@@ -596,16 +602,16 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
                 body = value;
                 resolvedContentType = resolvedContentType ?? 'text/plain; charset=utf-8';
             } else {
-                body = JSON.stringify(value);
+                body = jsonStringify(value);
                 resolvedContentType = resolvedContentType ?? 'application/json; charset=utf-8';
             }
-            await apiCall('PUT', `/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`, {
+            await apiCall('PUT', `/key-value-stores/${encodeUriComponent(storeId)}/records/${encodeUriComponent(key)}`, {
                 body, contentType: resolvedContentType,
             });
         },
 
         list: ({ storeId, limit, exclusiveStartKey }: KeyValueStoreListOptions): Promise<ApifyRecord> =>
-            apiData('GET', `/key-value-stores/${encodeURIComponent(storeId)}/keys`, {
+            apiData('GET', `/key-value-stores/${encodeUriComponent(storeId)}/keys`, {
                 searchParams: { limit, exclusiveStartKey },
             }),
 
@@ -669,12 +675,12 @@ async function pushOutput({ apiV2, token, internalFetch, env, item }: {
 }): Promise<void> {
     const datasetId = env.DEFAULT_DATASET_ID || env.DEFAULT_DATASET_ID_LEGACY;
     if (!datasetId) throw new Error('Default dataset ID missing from Actor run environment.');
-    const response = await internalFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
+    const response = await internalFetch(`${apiV2}/datasets/${encodeUriComponent(datasetId)}/items`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
-        body: JSON.stringify(item),
+        body: jsonStringify(item),
     });
-    if (!response.ok) throw new Error(`Failed to push dataset item: ${response.status} ${await response.text()}`);
+    if (!responseOk(response)) throw new Error(`Failed to push dataset item: ${response.status} ${await response.text()}`);
 }
 
 // Parses an optional positive-number env var (as set by entrypoint.sh from Actor input).
@@ -685,7 +691,7 @@ async function pushOutput({ apiV2, token, internalFetch, env, item }: {
 // that already-unlikely case, not a substitute for the schema validation.
 function parsePositiveNumberEnv(value: string | undefined): number | undefined {
     if (!value) return undefined;
-    const parsed = Number(value);
+    const parsed = realNumber(value);
     return numberIsFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
@@ -695,7 +701,7 @@ function parsePositiveNumberEnv(value: string | undefined): number | undefined {
 // (APIFY_TOKEN, INTERNAL_API) the next time workerd genuinely dispatches to this worker.
 export default realObjectFreeze({
     async fetch(request: Request, env: Env): Promise<Response> {
-        const url = new URL(request.url);
+        const url = new RealURL(request.url);
         if (url.pathname === '/health') return new Response('ok');
         if (url.pathname !== '/run') return new Response('Not found', { status: 404 });
 

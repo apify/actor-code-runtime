@@ -232,7 +232,9 @@ describe('module exports', () => {
         // guard.ts's capture-block comment for why they need to be exported at all.
         const knownSafeExports = new Set([
             'isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch',
-            'realObjectFreeze', 'setHas', 'numberIsFinite', 'mathMin',
+            'realObjectFreeze', 'setHas', 'numberIsFinite', 'mathMin', 'realNumber',
+            'encodeUriComponent', 'jsonStringify', 'urlHostname', 'urlProtocol',
+            'responseOk', 'responseStatus', 'RealURL',
         ]);
         for (const key of Object.keys(guard)) {
             expect(knownSafeExports.has(key)).toBe(true);
@@ -286,6 +288,67 @@ describe('captured builtins resist prototype/static-method poisoning', () => {
             expect(guard.mathMin(5, 2)).toBe(2);
         } finally {
             Math.min = original;
+        }
+    });
+
+    it('realNumber still coerces correctly after the global Number is poisoned', () => {
+        const original = globalThis.Number;
+        // @ts-expect-error -- deliberately substituting an incompatible value to prove
+        // guard.ts's captured reference doesn't go through it.
+        globalThis.Number = () => 999;
+        try {
+            expect(guard.realNumber('42')).toBe(42);
+        } finally {
+            globalThis.Number = original;
+        }
+    });
+
+    it('encodeUriComponent still escapes after the global encodeURIComponent is poisoned to a no-op', () => {
+        const original = globalThis.encodeURIComponent;
+        globalThis.encodeURIComponent = (x) => String(x); // strips all escaping, e.g. lets '/'/'..' through
+        try {
+            expect(guard.encodeUriComponent('../secret')).toBe('..%2Fsecret');
+        } finally {
+            globalThis.encodeURIComponent = original;
+        }
+    });
+
+    it('jsonStringify still serializes real data after the global JSON.stringify is poisoned', () => {
+        const original = JSON.stringify;
+        JSON.stringify = () => '{"forged":true}';
+        try {
+            expect(guard.jsonStringify({ real: 1 })).toBe('{"real":1}');
+        } finally {
+            JSON.stringify = original;
+        }
+    });
+
+    it('responseOk still reads the real status after Response.prototype.ok is poisoned to always return true', () => {
+        const original = Object.getOwnPropertyDescriptor(Response.prototype, 'ok')!;
+        Object.defineProperty(Response.prototype, 'ok', { get: () => true, configurable: true });
+        try {
+            const failedResponse = new Response(null, { status: 500 });
+            expect(guard.responseOk(failedResponse)).toBe(false);
+        } finally {
+            Object.defineProperty(Response.prototype, 'ok', original);
+        }
+    });
+
+    it('urlHostname/urlProtocol still read the real values after URL.prototype accessors are poisoned', () => {
+        const originalHostname = Object.getOwnPropertyDescriptor(URL.prototype, 'hostname')!;
+        const originalProtocol = Object.getOwnPropertyDescriptor(URL.prototype, 'protocol')!;
+        Object.defineProperty(URL.prototype, 'hostname', { get: () => 'apify.com', configurable: true });
+        Object.defineProperty(URL.prototype, 'protocol', { get: () => 'https:', configurable: true });
+        try {
+            // Regression test for a real bypass found in review: validateUrl used to read
+            // `url.hostname`/`url.protocol` directly, resolving through URL.prototype's own
+            // accessors — poisonable the same way a prototype method is, no module-scope
+            // escape needed. See guard.ts's capture-block comment for the fix (capture the
+            // getter FUNCTION, invoke via .call(), never `value.property`).
+            expect(() => guard.validateUrl('http://example.com/')).toThrow(/only apify\.com/);
+        } finally {
+            Object.defineProperty(URL.prototype, 'hostname', originalHostname);
+            Object.defineProperty(URL.prototype, 'protocol', originalProtocol);
         }
     });
 });

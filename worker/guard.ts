@@ -10,56 +10,71 @@
 // be a non-fetch egress path around the allowlist (apify/ai-team#216 finding A,
 // via WebSocket). If a future need arises, wrap them like fetch instead.
 //
-// This module used to also hand runner.js an unrestricted "real fetch" for its
-// own internal API calls, via a pair of exports (markRequestHandlingStarted /
-// claimRealFetch). That capability-through-export design was broken: anything
-// in usercode.js's module scope can `import('./guard.js')` too (ES modules
-// have no notion of a "trusted" importer), so user code could call the same
-// exports runner.js did and steal the unrestricted fetch before runner.js's
-// own claim ran (PR #1 review, 2026-07-21 and again 2026-08-01 — the second
-// round found the first fix's gate was itself still an exported, callable
-// setter). Any function this module exports is equally reachable from
-// usercode.js, so no export-based gate can be made sound.
-//
-// The actual fix moves runner.js's internal API access off of a module export
-// entirely and onto workerd's own env binding (`INTERNAL_API` in
-// config.capnp, wired to a separate outbound network service — see there).
-// `env` is a parameter workerd hands only to the genuinely-dispatched
-// `fetch(request, env)` call; nothing at module-evaluation time (including an
-// escaped top-level statement in usercode.js) ever receives a reference to
-// it, so there is nothing here for user code to import or steal. This module
-// no longer needs to capture or export a privileged fetch at all.
+// This module used to also hand runner.js an unrestricted "real fetch" for its own
+// internal API calls via a pair of exports. That capability-through-export design was
+// broken: anything in usercode.js's module scope can `import('./guard.js')` too (ES
+// modules have no notion of a "trusted" importer), so user code could call the same
+// exports runner.js did and steal the capability before runner.js's own use of it. The fix
+// moves runner.js's internal API access off of any module export entirely and onto
+// workerd's own env binding (`INTERNAL_API` in config.capnp, wired to a separate outbound
+// network service — see there). `env` is a parameter workerd hands only to the
+// genuinely-dispatched `fetch(request, env)` call; nothing at module-evaluation time
+// (including an escaped top-level statement in usercode.js) ever receives a reference to
+// it, so there is nothing here for user code to import or steal.
 const realFetch = globalThis.fetch.bind(globalThis);
 
 // Every name below is captured HERE, at guard.js's own module-evaluation time — which
 // always finishes before usercode.js's module body ever runs (see runner.ts's import-order
 // comment) — because an ordinary script, no module-scope escape needed, can reassign or
 // monkey-patch any JS builtin this file's (or runner.ts's) security decisions depend on.
-// Two different attacks, both closed the same way:
+// Three attack shapes, all closed the same way (capture the real thing before a script
+// gets the chance to touch it):
 //   - Reassigning the global itself (`globalThis.URL = FakeClass`,
-//     `globalThis.Object.freeze = noop`) — defeated by capturing a direct reference before
-//     a script gets the chance to reassign it. `RealURL`/`realObjectFreeze` below.
+//     `globalThis.encodeURIComponent = x => x`) — defeated by capturing a direct reference.
 //   - Poisoning a shared PROTOTYPE method or static function (`String.prototype.endsWith =
-//     () => true`, `Number.isFinite = () => true`, `Set.prototype.has = () => true`) — a
-//     captured *constructor* reference does NOT protect this: `RealURL.prototype` IS
-//     `URL.prototype`, the same mutable object reachable through the still-live global
-//     name. The only fix is capturing the METHOD/FUNCTION itself, then invoking it
-//     directly (`stringEndsWith.call(host, suffix)`) instead of through the poisonable
-//     `value.method()` syntax. `setHas`/`numberIsFinite`/`mathMin` and the string helpers
-//     used by `isAllowedHost` below are all this second kind.
-// This block is the audit surface for that whole trust boundary: anything guard.ts or
-// runner.ts uses to make a security/allowlist/ownership decision belongs here, not called
-// bare — three real bypasses of exactly this shape were found in review (PR #1, rounds
-// 2026-07-21 through 2026-08-04) before this was made systematic.
+//     () => true`, `Set.prototype.has = () => true`, `Number.isFinite = () => true`) — a
+//     captured *constructor* reference does NOT protect this (`RealURL.prototype` IS
+//     `URL.prototype`, the same mutable object the still-live global name reaches). Fixed
+//     by capturing the METHOD/FUNCTION itself and invoking it directly
+//     (`stringEndsWith.call(host, suffix)`), never through the poisonable `value.method()`.
+//   - Poisoning a shared PROTOTYPE ACCESSOR/getter (`Object.defineProperty(URL.prototype,
+//     'hostname', { get: () => 'apify.com' })`) — same fix, one level removed: capture the
+//     getter FUNCTION and invoke it via `.call(instance)` instead of reading
+//     `instance.property`.
+// This block is the whole audit surface: anything guard.ts or runner.ts uses to make a
+// security/allowlist/ownership/budget decision belongs here, not called bare. Multiple real
+// bypasses of exactly this shape were found in review before this was made systematic. When
+// adding a new capture here, follow the plain descriptive name already used below (not the
+// older `real`+Name scheme on the first two, kept as-is to avoid unrelated call-site churn),
+// and add a poisoning-regression test in tests/unit/guard.test.ts mirroring the existing ones.
 const RealURL = globalThis.URL;
 export const realObjectFreeze: typeof Object.freeze = Object.freeze.bind(Object);
 const stringToLowerCase = String.prototype.toLowerCase;
+const stringToUpperCase = String.prototype.toUpperCase;
 const stringEndsWith = String.prototype.endsWith;
 const stringSlice = String.prototype.slice;
 const setHasMethod = Set.prototype.has;
 export const setHas = <T>(set: ReadonlySet<T>, value: T): boolean => setHasMethod.call(set, value);
 export const numberIsFinite: (value: unknown) => boolean = Number.isFinite;
 export const mathMin: (a: number, b: number) => number = Math.min;
+export const realNumber: (value: unknown) => number = Number;
+export const encodeUriComponent: (value: string) => string = globalThis.encodeURIComponent;
+export const jsonStringify: (value: unknown) => string = JSON.stringify.bind(JSON);
+const urlHostnameGetter = Object.getOwnPropertyDescriptor(RealURL.prototype, 'hostname')!.get!;
+const urlProtocolGetter = Object.getOwnPropertyDescriptor(RealURL.prototype, 'protocol')!.get!;
+export const urlHostname = (url: URL): string => urlHostnameGetter.call(url);
+export const urlProtocol = (url: URL): string => urlProtocolGetter.call(url);
+const responseOkGetter = Object.getOwnPropertyDescriptor(Response.prototype, 'ok')!.get!;
+const responseStatusGetter = Object.getOwnPropertyDescriptor(Response.prototype, 'status')!.get!;
+export const responseOk = (response: Response): boolean => responseOkGetter.call(response);
+export const responseStatus = (response: Response): number => responseStatusGetter.call(response);
+
+// Exported so runner.ts's own internal-API URL building (buildUrl in runner.ts) uses the
+// same captured, un-hijackable constructor this file's own allowlist relies on — a second,
+// independent `new URL(...)` call site is just as reachable/poisonable as this file's own,
+// and runner.ts's version builds the URL for the unrestricted, token-bearing internal API
+// call, making it the higher-severity of the two if missed.
+export { RealURL };
 
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
@@ -89,16 +104,22 @@ export function validateUrl(input: RequestInfo | URL): URL {
     try {
         // Parse to the real host — defeats userinfo (`apify.com@evil.com`),
         // path/query/fragment (`evil.com/apify.com`) and similar tricks. Uses RealURL
-        // (see above), not the bare global, so a hijacked globalThis.URL can't lie here.
+        // (see the capture block above), not the bare global, so a hijacked globalThis.URL
+        // can't lie here.
         url = new RealURL(requestUrl(input));
     } catch {
         throw new Error('Blocked fetch: only absolute http(s) URLs to apify.com are allowed');
     }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-        throw new Error(`Blocked fetch: protocol "${url.protocol}" is not allowed`);
+    // Read via the captured getters (see the capture block above), not `url.protocol`/
+    // `url.hostname` directly — those resolve through URL.prototype's own accessors, which
+    // are poisonable the same way a prototype method is (RealURL.prototype IS URL.prototype).
+    const protocol = urlProtocol(url);
+    if (protocol !== 'https:' && protocol !== 'http:') {
+        throw new Error(`Blocked fetch: protocol "${protocol}" is not allowed`);
     }
-    if (!isAllowedHost(url.hostname)) {
-        throw new Error(`Blocked fetch to "${url.hostname}": only apify.com and its subdomains are allowed`);
+    const hostname = urlHostname(url);
+    if (!isAllowedHost(hostname)) {
+        throw new Error(`Blocked fetch to "${hostname}": only apify.com and its subdomains are allowed`);
     }
     return url;
 }
@@ -113,7 +134,7 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECT_HOPS = 5;
 
 export function nextRedirectInit(init: RequestInit | undefined, status: number): RequestInit | undefined {
-    const method = (init?.method ?? 'GET').toUpperCase();
+    const method: string = stringToUpperCase.call(init?.method ?? 'GET');
     const downgradeToGet = status === 303 || ((status === 301 || status === 302) && method === 'POST');
     if (!downgradeToGet) return init;
     return { ...init, method: 'GET', body: undefined };
@@ -128,11 +149,12 @@ async function guardedFetchHop(input: RequestInfo | URL, init: RequestInit | und
     }
     const url = validateUrl(input);
     const response = await realFetch(input, { ...init, redirect: 'manual' });
-    if (!setHas(REDIRECT_STATUSES, response.status)) return response;
+    const status = responseStatus(response);
+    if (!setHas(REDIRECT_STATUSES, status)) return response;
     const location = response.headers.get('location');
     if (!location) return response; // redirect status with no Location: nothing to follow
     const nextUrl = new RealURL(location, url); // resolves a relative Location against the current URL
-    return guardedFetchHop(nextUrl.href, nextRedirectInit(init, response.status), hop + 1);
+    return guardedFetchHop(nextUrl.href, nextRedirectInit(init, status), hop + 1);
 }
 
 export function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined): Promise<Response> {
