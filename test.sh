@@ -1,15 +1,11 @@
 #!/bin/sh
-# Deploy the Actor (apify push) once, then run each test probe on the freshly
-# built version via `apify call`. Each probe is a script submitted as the `code`
-# input; it prints ALL_TESTS_PASSED on success. Exits non-zero if any probe fails.
-#
+# Build, deploy, and run each remote probe.
 # Usage: ./test.sh
 set -eu
 
 cd "$(dirname "$0")"
 
-# Probes are written in tests/*.ts and compiled by `pnpm build`; add a .ts file
-# there to register a new probe. Run against the built Actor.
+# Build probes from tests/*.ts.
 PROBES="tests/binding-smoke.js tests/sandbox-isolation.js"
 
 command -v apify >/dev/null 2>&1 || { echo "apify CLI not found" >&2; exit 1; }
@@ -41,15 +37,7 @@ done
 [ "$failed" -eq 0 ] || { echo "==> some probes FAILED" >&2; exit 1; }
 echo "==> all probes passed"
 
-# Regression probe for the guard.js capability-theft bug (PR #1 review,
-# 2026-07-21 and 2026-08-01): tests/fixtures/realfetch-escape.js escapes
-# usercode.js's wrapper into module scope and tries to steal an unrestricted
-# fetch by calling guard.js's (now-removed) claimRealFetch export directly.
-# It has no captured console to report through (see the file's own comment),
-# so success/failure is the Actor run itself succeeding vs. failing -- not a
-# printed sentinel like the probes above. The run is expected to SUCCEED
-# (with a "Failed to compile" diagnostic item, since claimRealFetch no longer
-# exists to call) -- see the fixture's own comment for the full reasoning.
+# Regression probe for module-scope capability theft.
 echo "==> apify call: tests/fixtures/realfetch-escape.js (regression: guard.js capability theft)"
 jq -n --arg code "$(cat tests/fixtures/realfetch-escape.js)" '{ code: $code }' > "$input_json"
 if apify call -f "$input_json" -o; then

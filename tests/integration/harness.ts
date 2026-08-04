@@ -1,10 +1,5 @@
-// Shared harness for integration tests that boot a REAL workerd instance against the actual
-// compiled worker/runner.js + worker/guard.js (not a mock, not just the pure functions vitest's
-// unit suite exercises in isolation). This is what closes the gap unit tests structurally
-// cannot: whether guard.js is actually wired into the module graph, whether env.INTERNAL_API
-// dispatch actually works, and whether the execution-limit safeguards actually fire end to end.
-// Needs `pnpm build` to have produced worker/runner.js + worker/guard.js first (the "build"
-// step in .github/workflows/typecheck.yml's integration job — see there).
+// Integration harness for real workerd, module wiring, and env bindings.
+// Run `pnpm build` first.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, writeFileSync, readFileSync, cpSync, rmSync } from 'node:fs';
@@ -17,19 +12,12 @@ const WORKERD_STARTUP_POLL_INTERVAL_MS = 100;
 const WORKERD_EXIT_TIMEOUT_MS = 2_000;
 
 function workerdBinaryPath(): string {
-    // Same resolution Dockerfile's builder stage uses: workerd ships its binary path via the
-    // package's own `default` export, one level of indirection because the platform-specific
-    // binary lives in an optional dependency (@cloudflare/workerd-linux-64 etc). `workerd`
-    // itself is a CommonJS package with no ESM entry point, hence createRequire rather than a
-    // static import.
+    // Match Dockerfile's workerd binary resolution.
     const require = createRequire(import.meta.url);
     return require('workerd').default;
 }
 
-// Binds an OS-assigned ephemeral port on a throwaway listener, then releases it — the same
-// "ask the OS for a free one" trick startMockApi() uses for its own port, reused here so
-// workerd's own port isn't picked by guessing a range (see the historical note this replaces:
-// a literal `10_000 + Math.random() * 10_000` had no collision retry).
+// Ask the OS for a free port instead of guessing.
 async function reserveEphemeralPort(): Promise<number> {
     const probe = createServer();
     await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
@@ -39,19 +27,12 @@ async function reserveEphemeralPort(): Promise<number> {
     return address.port;
 }
 
-// A minimal stand-in for the platform-internal Apify API — just enough to make
-// actor.start/dataset operations/pushOutput resolve, so a script's real behavior (including
-// safeguard rejections, which happen before any HTTP call) is observable end to end.
+// Minimal API stand-in for end-to-end runtime behavior.
 export interface MockApi {
     server: Server;
     port: number;
     requests: { method: string; path: string; body: string }[];
-    /**
-     * Makes the NEXT `POST .../acts/:id/runs` request fail with the given status/body instead
-     * of succeeding — one-shot, cleared after it fires. Lets a test prove createRun()'s
-     * reservation rollback actually releases the run-count/budget slot on a real API
-     * rejection, not just on the happy path.
-     */
+    /** Fail the next run-create request once. */
     failNextRunCreate: (status: number, body: string) => void;
     close: () => Promise<void>;
 }
@@ -64,11 +45,7 @@ export async function startMockApi(): Promise<MockApi> {
         req.on('data', (chunk: Buffer) => chunks.push(chunk));
         req.on('end', () => {
             const body = Buffer.concat(chunks).toString('utf8');
-            // req.url is path+query (no scheme/host); parse against a throwaway base so
-            // route matching is on the PATH alone — matching the raw string (e.g. with
-            // `.endsWith('/runs')`) breaks the moment a real request carries a query string
-            // (createRun() always attaches one: waitForFinish/timeout/memory/maxTotalChargeUsd),
-            // silently falling through to the wrong response branch below.
+            // Match paths without query strings.
             const pathname = new URL(req.url ?? '/', 'http://mock-api.internal').pathname;
             requests.push({ method: req.method ?? '', path: req.url ?? '', body });
             res.setHeader('content-type', 'application/json');
@@ -107,28 +84,23 @@ export async function startMockApi(): Promise<MockApi> {
 }
 
 export interface RunOptions {
-    /** Actor input fields beyond `code`, e.g. { maxActorRuns: 1 } — mirrors what entrypoint.sh reads. */
+    /** Input fields beyond `code`. */
     inputFields?: Record<string, unknown>;
-    /** Called with the MockApi after it's started but before workerd boots — e.g. to arm failNextRunCreate(). */
+    /** Configure the mock before workerd starts. */
     beforeStart?: (mockApi: MockApi) => void;
 }
 
 export interface RunResult {
-    /** The pushed dataset item, or null if pushOutput never ran (e.g. workerd crashed at startup). */
+    /** Pushed output, or null if output was never written. */
     pushedItem: Record<string, unknown> | null;
-    /** True if workerd itself started and served /health before we tore it down. */
+    /** Whether workerd served /health. */
     startedCleanly: boolean;
-    /** Raw stderr from the workerd process (useful for asserting startup-crash diagnostics). */
+    /** Workerd stderr. */
     stderr: string;
     mockApi: MockApi;
 }
 
-// Boots a fresh workerd instance with `code` wrapped exactly like entrypoint.sh does, against a
-// fresh MockApi standing in for the internal Apify API, sends one /run request, and tears both
-// down — every acquired resource (mock server, workerd process, temp dir) is released on every
-// path, including when workerd never becomes healthy or a step above throws. Mirrors
-// entrypoint.sh's own env var wiring (CODE_RUNTIME_* for the execution limits) rather than
-// reinventing a second convention.
+// Boot workerd with wrapped code, run once, and release all resources.
 export async function runScript(code: string, options: RunOptions = {}): Promise<RunResult> {
     const mockApi = await startMockApi();
     try {
@@ -152,10 +124,7 @@ async function runInWorkDir(code: string, options: RunOptions, mockApi: MockApi,
     writeFileSync(join(workDir, 'usercode.js'), `export async function run(apify, console) {\n${code}\n}\n`);
 
     const port = await reserveEphemeralPort();
-    // config.capnp's __PORT__ placeholder appears twice (once in a comment, once in the real
-    // socket address) — replaceAll, not replace, or the comment's occurrence "wins" and the
-    // real one is left as the literal string "__PORT__" (workerd then fails DNS-resolving it
-    // as a port/service name).
+    // Replace both config placeholders.
     const configTemplate = readFileSync(join(repoRoot, 'worker', 'config.capnp'), 'utf8');
     writeFileSync(join(workDir, 'config.capnp'), configTemplate.replaceAll('__PORT__', String(port)));
 
@@ -183,15 +152,15 @@ async function runInWorkDir(code: string, options: RunOptions, mockApi: MockApi,
             try {
                 const res = await fetch(`http://127.0.0.1:${port}/health`);
                 if (res.ok) { startedCleanly = true; break; }
-            } catch { /* not up yet, or crashed — keep polling until the deadline */ }
-            if (child.exitCode !== null) break; // crashed at startup, no point polling further
+            } catch { /* retry until timeout */ }
+            if (child.exitCode !== null) break;
             await new Promise((resolve) => setTimeout(resolve, WORKERD_STARTUP_POLL_INTERVAL_MS));
         }
 
         if (startedCleanly) {
             try {
                 await fetch(`http://127.0.0.1:${port}/run`, { method: 'POST' });
-            } catch { /* the /run call itself may crash the worker — that's a result to assert on, not a harness failure */ }
+            } catch { /* assert worker failures from returned state */ }
         }
 
         const pushRequest = mockApi.requests.find((r) => {
@@ -206,9 +175,7 @@ async function runInWorkDir(code: string, options: RunOptions, mockApi: MockApi,
         };
     } finally {
         child.kill();
-        // Wait for the process to actually exit (with a SIGKILL escalation) before returning —
-        // otherwise a workerd process slow to honor SIGTERM can still be running (and holding
-        // its port) when the next test in this file starts spawning its own.
+        // Ensure slow workerd processes cannot hold ports between tests.
         if (child.exitCode === null) {
             await Promise.race([
                 new Promise<void>((resolve) => child.once('exit', () => resolve())),

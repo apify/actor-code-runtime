@@ -1,13 +1,5 @@
-// Smoke test for the `apify` binding exposed to Code Mode programs. Submitted as
-// the Actor's `code` input by test.sh and executed on the built Actor via
-// `apify call`. Exercises every binding method and prints a sentinel line
-// (ALL_TESTS_PASSED) that test.sh greps for.
-//
-// `export {}` marks this file as its own ES module, so its top-level consts
-// don't collide with the other probe's (both are type-checked in one tsc
-// program) and top-level await below is legal. `pnpm build` strips this line
-// post-compile (see package.json) -- left in, it would be a syntax error once
-// spliced into the wrapping `async function run(apify, console) { ... }`.
+// Actor probe covering every exposed binding method.
+// `export {}` enables top-level await; build strips it before wrapping code.
 export {};
 
 const results: boolean[] = [];
@@ -25,11 +17,9 @@ async function check(name: string, fn: () => Promise<unknown>): Promise<void> {
 const ACTOR = 'apify/hello-world';
 const [ACTOR_USERNAME, ACTOR_NAME] = ACTOR.split('/');
 
-// Every status the Apify API can return for a run. Used to check a returned status is a
-// real value, not just any truthy string -- mirrors DONE_TRACKING_STATUSES in worker/runner.ts.
+// All run statuses returned by the Apify API.
 const RUN_STATUSES = new Set(['READY', 'RUNNING', 'SUCCEEDED', 'FAILED', 'ABORTING', 'ABORTED', 'TIMING-OUT', 'TIMED-OUT']);
 
-// ---- actor (read) ----
 await check('store', async () => {
     const page = await apify.store({ search: 'hello world', limit: 3 });
     if (!Array.isArray(page.items) || page.items.length === 0) throw new Error(`expected non-empty items array, got ${JSON.stringify(page.items)}`);
@@ -50,7 +40,6 @@ await check('actor.get', async () => {
     return `${d.username}/${d.name}`;
 });
 
-// ---- dataset ----
 let datasetId = '';
 await check('dataset.create', async () => {
     datasetId = (await apify.dataset.create()).id as string;
@@ -85,7 +74,6 @@ await check('dataset.listItems (for await)', async () => {
     return `${n} iterated`;
 });
 
-// ---- key-value store ----
 let storeId = '';
 await check('keyValueStore.create', async () => {
     storeId = (await apify.keyValueStore.create()).id as string;
@@ -112,7 +100,6 @@ await check('keyValueStore.list', async () => {
     return `${l.items.length} keys`;
 });
 
-// ---- run lifecycle ----
 let runId = '';
 await check('actor.start', async () => {
     const run = await apify.actor.start({ actorId: ACTOR });
@@ -138,7 +125,6 @@ await check('run.getLog', async () => {
     return `${log.length} chars`;
 });
 
-// ---- run + get items (sync) ----
 await check('actor.call', async () => {
     const run = await apify.actor.call({ actorId: ACTOR, waitForFinishSecs: 60 });
     if (!RUN_STATUSES.has(run.status)) throw new Error(`actor.call returned unexpected status: ${JSON.stringify(run.status)}`);
@@ -151,7 +137,6 @@ await check('actor.callAndGetItems', async () => {
     return `status=${run.status} items=${items.length}`;
 });
 
-// ---- abort ----
 await check('run.abort', async () => {
     const run = await apify.actor.start({ actorId: ACTOR });
     const aborted = await apify.run.abort({ runId: run.id as string });

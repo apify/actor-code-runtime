@@ -1,9 +1,5 @@
 #!/bin/sh
-# Normal-mode (non-standby) Apify Actor entrypoint. Single-tenant per run:
-#   1. read the Actor input and wrap its `code` into the runnable usercode.js module
-#   2. boot workerd on loopback (it embeds runner.js + usercode.js)
-#   3. trigger /run once, then exit
-# workerd hosts the sandboxed worker and is reached only over loopback.
+# Read input, start workerd, trigger one run, then exit.
 set -eu
 
 PORT=8787
@@ -21,8 +17,7 @@ if [ -z "${APIFY_TOKEN:-}" ] || [ -z "$STORE_ID" ] || [ -z "$DATASET_ID" ]; then
     exit 1
 fi
 
-# Fetch the Actor input and wrap its `code` into the runnable module. The `code`
-# is inserted as code between the wrapper lines (not as a string) — no escaping.
+# Insert input code directly into the generated module.
 INPUT_URL="${API_BASE}/v2/key-value-stores/${STORE_ID}/records/${INPUT_KEY}"
 input_status=$(curl -sS -o /tmp/input.json -w '%{http_code}' \
     -H "Authorization: Bearer ${APIFY_TOKEN}" "$INPUT_URL")
@@ -37,27 +32,18 @@ fi
     printf '\n}\n'
 } > /app/worker/usercode.js
 
-# Execution-level safeguards (all optional Actor input fields — see runner.ts's Limits and
-# docs/API.md's "Execution limits"). `// empty` yields an empty string (not "0"/"null") when
-# the field is absent; runner.ts's parsePositiveNumberEnv treats a blank value as "no limit
-# configured".
+# Export optional execution limits; blank means unlimited.
 export CODE_RUNTIME_MAX_ACTOR_RUNS="$(jq -r '.maxActorRuns // empty' < /tmp/input.json)"
 export CODE_RUNTIME_MAX_TOTAL_CHARGE_USD="$(jq -r '.maxTotalChargeUsd // empty' < /tmp/input.json)"
 export CODE_RUNTIME_DEFAULT_TIMEOUT_SECS="$(jq -r '.defaultTimeoutSecs // empty' < /tmp/input.json)"
 
-# config.capnp hardcodes __PORT__ as a placeholder so the port has one source ($PORT above).
 sed -i "s/__PORT__/${PORT}/" /app/worker/config.capnp
 
 /usr/local/bin/workerd serve --experimental /app/worker/config.capnp 2>"$WORKERD_STDERR" &
 workerd_pid=$!
 trap 'kill "$workerd_pid" 2>/dev/null || true' EXIT
 
-# push_compile_failure reports a usercode.js syntax error as a normal, SUCCEEDED script
-# result (same contract as a script that throws at runtime) instead of failing the whole
-# Actor run. usercode.js wraps the user's `code` inside `export async function run(...) {
-# ... }` with nothing else at module scope, so nothing in it can fail to *parse* except
-# that inserted code — a startup crash naming usercode.js is therefore always a syntax
-# error in the user's script, never our own code. See detection below.
+# Report user-code compile errors as diagnostic output.
 push_compile_failure() {
     crash_log=$(cat "$WORKERD_STDERR" 2>/dev/null || true)
     echo "[code-runtime] usercode.js failed to compile: $crash_log" >&2
@@ -94,7 +80,5 @@ until curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; do
     sleep 0.1
 done
 
-# Trigger the single run. The worker runs the program and pushes { stdout, stderr,
-# exitCode, statusMessage } to the default dataset. A non-2xx response fails the Actor
-# run (curl -f).
+# Trigger one run; non-2xx fails the Actor run.
 curl -fsS -X POST "http://127.0.0.1:${PORT}/run"

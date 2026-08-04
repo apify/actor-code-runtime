@@ -1,23 +1,9 @@
-# Two-stage build: drop the Node runtime entirely. workerd is a standalone
-# glibc binary; only libc + libm are needed at runtime (verified via `ldd`).
-#
-# Stage 1: pull the workerd binary + compile worker/*.ts -> worker/*.js, via a Node
-# base. Node already runs here to resolve workerd's binary path, so compiling
-# TypeScript is one more RUN line, not a new toolchain. pnpm keeps workerd in the
-# virtual store (not hoisted), so resolve the path through `require('workerd')`.
+# Build with Node; run with only workerd and required utilities.
 FROM node:24-bookworm-slim AS builder
 WORKDIR /build
 COPY package.json pnpm-lock.yaml tsconfig.json ./
 COPY worker/ ./worker/
-# --ignore-scripts skips workerd's postinstall (a binary-download fallback we
-# don't need — the binary ships in the @cloudflare/workerd-linux-64 optional dep)
-# and avoids pnpm's hard error on unapproved dependency build scripts. Full
-# (non --prod) install: typescript is a devDependency, needed to compile below.
-# Compile with tsc directly, not `pnpm run build`: that script also sed's
-# tests/*.js (dev-only probe fixtures for test.sh, submitted as Actor input at
-# run time — never part of the image), which isn't copied into this build
-# context and doesn't need to be; tsconfig's tests/*.ts include glob simply
-# matches nothing here.
+# The binary ships in an optional dependency; compile worker files directly.
 RUN corepack enable \
     && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm exec tsc -p tsconfig.json \
@@ -25,11 +11,10 @@ RUN corepack enable \
     && cp "$BIN" /workerd \
     && chmod +x /workerd
 
-# Stage 2: minimal runtime — debian + ca-certificates + the workerd binary + the
-# compiled JS. No Node, no TypeScript, no npm packages in this image.
+# Minimal runtime image: workerd, compiled JS, and certificates.
 FROM debian:bookworm-slim
 
-# curl: loopback HTTP client + Actor-input fetch; jq: extract `code` from the input JSON.
+# curl fetches input; jq extracts user code.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl jq \
     && rm -rf /var/lib/apt/lists/*

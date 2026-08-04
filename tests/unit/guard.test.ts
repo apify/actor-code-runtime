@@ -1,14 +1,5 @@
-// Token-free, CI-runnable unit tests for worker/guard.ts's allowlist logic — no workerd,
-// no `apify push`/`apify call`, no live Actor run. Fills the gap flagged in PR #1 review
-// (2026-07-21): CI only ran `pnpm run typecheck`; every behavioral test required a live
-// token, so `isAllowedHost`/`validateUrl`'s allowlist paths and `guardedFetch`'s redirect
-// re-validation (the entire reason that function exists) had no test of any kind.
-//
-// guard.ts overrides `globalThis.fetch` as a side effect of being imported, and captures
-// whatever `globalThis.fetch` was *at that moment* as its own internal `realFetch` (used by
-// guardedFetch to perform the actual, pre-validated request). So: stub `globalThis.fetch`
-// with a controllable mock BEFORE importing guard.ts, then call the exported `guardedFetch`
-// directly — it runs against the mock, no network I/O, fully deterministic.
+// Offline unit tests for URL validation, redirects, and builtin captures.
+// Stub fetch before importing guard.ts because import installs the guard.
 import { describe, expect, it, vi, beforeAll } from 'vitest';
 
 let guard: typeof import('../../worker/guard.js');
@@ -33,21 +24,17 @@ describe('isAllowedHost', () => {
         ['apify.com', true],
         ['api.apify.com', true],
         ['deeply.nested.apify.com', true],
-        ['APIFY.COM', true], // case-insensitive
-        ['apify.com.', true], // trailing FQDN dot stripped
-        ['evilapify.com', false], // suffix without the separating dot
-        ['apify.com.evil.com', false], // real host is evil.com
+        ['APIFY.COM', true],
+        ['apify.com.', true],
+        ['evilapify.com', false],
+        ['apify.com.evil.com', false],
         ['notapify.com', false],
         ['example.com', false],
     ])('%s -> %s', (hostname, expected) => {
         expect(guard.isAllowedHost(hostname)).toBe(expected);
     });
 
-    // Regression test for a real bypass found in review: isAllowedHost used to call
-    // `hostname.toLowerCase()`/`.endsWith()` directly, resolving through the live,
-    // ordinary-script-writable `String.prototype` — no module-scope escape needed. See
-    // guard.ts's capture-block comment for the fix (capture the actual method functions,
-    // call them via .call() instead of value.method()).
+    // Regression test for String.prototype poisoning.
     it('still rejects a disallowed host after String.prototype.endsWith is poisoned', () => {
         const original = String.prototype.endsWith;
         // eslint-disable-next-line no-extend-native -- deliberately simulating the attack this test guards against
@@ -93,12 +80,7 @@ describe('validateUrl', () => {
         expect(guard.validateUrl(new Request('https://apify.com/x')).hostname).toBe('apify.com');
     });
 
-    // Regression test for a real bypass found in review: validateUrl used to call the bare
-    // `new URL(...)`, which resolves whatever `globalThis.URL` currently is. A script that
-    // replaces it with a lying implementation (real .href, faked .hostname) could make
-    // validateUrl believe a disallowed host was apify.com, with no module-scope-escape trick
-    // needed at all — see guard.ts's capture-block comment for the fix (capture the real URL
-    // constructor before usercode.js can ever run).
+    // Regression test for URL constructor poisoning.
     it('still rejects a disallowed host after globalThis.URL is replaced with a lying constructor', () => {
         const OriginalURL = globalThis.URL;
         class LyingURL extends OriginalURL {
@@ -160,7 +142,7 @@ describe('guardedFetch', () => {
         expect(response.status).toBe(200);
         expect(mockFetch).toHaveBeenCalledTimes(1);
         const [, init] = mockFetch.mock.calls[0];
-        expect(init.redirect).toBe('manual'); // never lets the underlying fetch auto-follow
+        expect(init.redirect).toBe('manual');
     });
 
     it('follows a redirect to another allowed host', async () => {
@@ -178,7 +160,7 @@ describe('guardedFetch', () => {
         mockFetch.mockClear();
         mockFetch.mockResolvedValueOnce(redirectResponse('https://evil.com/steal', 302));
         await expect(guard.guardedFetch('https://apify.com/start', undefined)).rejects.toThrow(/only apify\.com/);
-        expect(mockFetch).toHaveBeenCalledTimes(1); // never followed the malicious hop
+        expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
     it('resolves a relative redirect Location against the current URL', async () => {
@@ -202,12 +184,7 @@ describe('guardedFetch', () => {
     });
 
     it('gives up after exactly MAX_REDIRECT_HOPS redirects to allowed hosts', async () => {
-        // MAX_REDIRECT_HOPS is module-private (not exported — see guard.ts's own comment on
-        // why nothing beyond the pure allowlist helpers is), so this pins the boundary by its
-        // observable effect instead: guard.ts's `hop > MAX_REDIRECT_HOPS` check means calls at
-        // hop 0..5 each make a real fetch (6 calls, MAX_REDIRECT_HOPS=5 + the initial request)
-        // before hop 6 throws without calling fetch again. A change to MAX_REDIRECT_HOPS's
-        // value, or an off-by-one in the `>` check, changes this exact count.
+        // Pins the redirect limit through observable request count.
         mockFetch.mockClear();
         for (let i = 0; i < 10; i++) mockFetch.mockResolvedValueOnce(redirectResponse('https://apify.com/loop', 302));
         await expect(guard.guardedFetch('https://apify.com/start', undefined)).rejects.toThrow(/exceeded 5 redirects/);
@@ -224,12 +201,7 @@ describe('guardedFetch', () => {
 
 describe('module exports', () => {
     it('never exports a raw/unrestricted fetch capability', () => {
-        // Regression guard for PR #1's finding: guard.js must never export anything that
-        // hands the caller an unwrapped fetch function or a way to bypass the allowlist.
-        // Every export must be one of these known-safe, pure helpers — realObjectFreeze/
-        // setHas/numberIsFinite/mathMin are safe by the same reasoning: each is still just
-        // the ordinary builtin operation, the concept itself carries no capability. See
-        // guard.ts's capture-block comment for why they need to be exported at all.
+        // Guard against exporting unrestricted fetch capabilities.
         const knownSafeExports = new Set([
             'isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch',
             'realObjectFreeze', 'setHas', 'numberIsFinite', 'mathMin', 'realNumber',
@@ -242,17 +214,11 @@ describe('module exports', () => {
     });
 });
 
-// Regression tests for guard.ts's capture-block: capturing a builtin's *reference* only
-// protects against `globalThis.X = somethingElse`. It does NOT protect a shared PROTOTYPE
-// method or static function (`X.prototype.method = ...`, `Number.isFinite = ...`), which
-// stays reachable through the still-live global name even if some OTHER code holds a
-// captured constructor reference — a captured URL constructor's `.prototype` IS the same
-// mutable object as the global `URL.prototype`. Each capture below needs its own resistance
-// test; sharing one wouldn't prove the others are covered.
+// Each captured builtin gets a poisoning regression test.
 describe('captured builtins resist prototype/static-method poisoning', () => {
     it('realObjectFreeze still freezes after the global Object.freeze is replaced with a no-op', () => {
         const original = Object.freeze;
-        Object.freeze = (<T>(o: T) => o) as typeof Object.freeze; // simulates a hijacked global, not a real no-op call site
+        Object.freeze = (<T>(o: T) => o) as typeof Object.freeze;
         try {
             const obj = guard.realObjectFreeze({ x: 1 });
             expect(Object.isFrozen(obj)).toBe(true);
@@ -283,7 +249,7 @@ describe('captured builtins resist prototype/static-method poisoning', () => {
 
     it('mathMin still returns the real minimum after the global Math.min is poisoned', () => {
         const original = Math.min;
-        Math.min = (a) => a; // always "returns the first argument", the wrong answer when a > b
+        Math.min = (a) => a;
         try {
             expect(guard.mathMin(5, 2)).toBe(2);
         } finally {
@@ -293,8 +259,7 @@ describe('captured builtins resist prototype/static-method poisoning', () => {
 
     it('realNumber still coerces correctly after the global Number is poisoned', () => {
         const original = globalThis.Number;
-        // @ts-expect-error -- deliberately substituting an incompatible value to prove
-        // guard.ts's captured reference doesn't go through it.
+        // @ts-expect-error -- simulate a poisoned global.
         globalThis.Number = () => 999;
         try {
             expect(guard.realNumber('42')).toBe(42);
@@ -305,7 +270,7 @@ describe('captured builtins resist prototype/static-method poisoning', () => {
 
     it('encodeUriComponent still escapes after the global encodeURIComponent is poisoned to a no-op', () => {
         const original = globalThis.encodeURIComponent;
-        globalThis.encodeURIComponent = (x) => String(x); // strips all escaping, e.g. lets '/'/'..' through
+        globalThis.encodeURIComponent = (x) => String(x);
         try {
             expect(guard.encodeUriComponent('../secret')).toBe('..%2Fsecret');
         } finally {
@@ -340,11 +305,7 @@ describe('captured builtins resist prototype/static-method poisoning', () => {
         Object.defineProperty(URL.prototype, 'hostname', { get: () => 'apify.com', configurable: true });
         Object.defineProperty(URL.prototype, 'protocol', { get: () => 'https:', configurable: true });
         try {
-            // Regression test for a real bypass found in review: validateUrl used to read
-            // `url.hostname`/`url.protocol` directly, resolving through URL.prototype's own
-            // accessors — poisonable the same way a prototype method is, no module-scope
-            // escape needed. See guard.ts's capture-block comment for the fix (capture the
-            // getter FUNCTION, invoke via .call(), never `value.property`).
+            // Regression test for URL accessor poisoning.
             expect(() => guard.validateUrl('http://example.com/')).toThrow(/only apify\.com/);
         } finally {
             Object.defineProperty(URL.prototype, 'hostname', originalHostname);

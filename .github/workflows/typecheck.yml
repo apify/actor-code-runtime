@@ -18,10 +18,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
-  # Token-free unit tests (guard.ts's allowlist/redirect logic) — no `apify push`/`apify
-  # call`, no live Actor run, no APIFY_TOKEN. See tests/unit/guard.test.ts's own header
-  # comment for what this covers and why it exists (PR #1 review, 2026-07-21: the security
-  # boundary itself had zero CI coverage before this).
+  # Token-free unit tests for guard and redirect logic.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -34,12 +31,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test
 
-  # Boots a real workerd process against the actual compiled worker/*.js (not a mock) — the
-  # only thing that can catch "guard.js's logic is correct but never actually wired into the
-  # module graph" (a real regression found in review) or "the execution-limit safeguards look
-  # right but don't hold under concurrent use" (another real regression found in review). See
-  # tests/integration/workerd-e2e.test.ts's own header comment. Still token-free/offline — the
-  # internal Apify API is a local mock (tests/integration/harness.ts), no live platform needed.
+  # Real workerd integration tests with a local API mock.
   test-integration:
     runs-on: ubuntu-latest
     steps:

@@ -1,47 +1,7 @@
-// Single worker for the per-run code-runtime Actor. It runs the user's program
-// (imported from the generated `usercode.js` module) with the `apify` REST
-// binding and a captured `console`, then pushes `{ stdout, stderr, exitCode,
-// statusMessage }` to the run's default dataset. The container entrypoint
-// generates `usercode.js`, boots workerd, and triggers `/run` once.
-//
-// Single-tenant: one run = one container = one program = one token. No Worker
-// Loader / per-request isolate is needed — the program runs in this worker,
-// which is itself the sandbox (no filesystem, restricted outbound network).
-// guard.js overrides globalThis.fetch to allow only apify.com.
-//
-// This worker's own (internal) API calls need an unrestricted, un-allowlisted
-// fetch — the internal API is a private IP, not *.apify.com. That capability
-// is bound as `env.INTERNAL_API` (config.capnp), a workerd service binding
-// wired to a separate outbound network, not a shared/exported fetch reference.
-// `env` is only ever handed to the genuinely-dispatched `fetch(request, env)`
-// call below by workerd's own runtime — nothing at module-evaluation time
-// (including attacker-controlled top-level code that escapes usercode.js's
-// wrapper, see entrypoint.sh) ever receives a reference to it, so there is
-// nothing for user code to import or steal. See guard.ts for why an
-// export-based handoff (this worker's previous design) could not be made
-// sound: usercode.js shares guard.js's module graph, so any function guard.js
-// exported was equally callable by escaped user code.
-//
-// guard.js MUST be the first import in this file, whether or not a name is bound from it.
-// Import declarations are hoisted and dependencies evaluate in the order first
-// encountered; guard.js has to install its fetch/WebSocket/EventSource overrides (and
-// capture RealURL/realObjectFreeze — see guard.ts) before usercode.js's module body runs,
-// including any attacker-controlled top-level statement that escapes usercode.js's
-// wrapper (see entrypoint.sh). Reversing this order (or dropping the import) silently
-// makes the entire allowlist dead code — `globalThis.fetch` stays the real, unrestricted
-// fetch for every script this Actor runs. tests/sandbox-isolation.ts is the regression
-// test for this: it fails loudly (`allow https://example.com/` check reports NOT blocked)
-// if this import is ever missing or reordered.
-//
-// Everything imported below is one of guard.js's own pre-captured builtin references (see
-// the capture block at the top of guard.ts for the full reasoning): this file's own
-// top-level code, and every function it defines, run AFTER usercode.js's module body
-// (import order), so a script can shadow/poison any of these globals — or their prototypes/
-// accessors — before this file ever uses them, unless it uses guard.js's captured
-// equivalents instead of calling them bare. This is exhaustive: every builtin this file's
-// own security decisions (redirect/ownership/budget checks) or its internal-API request
-// construction (URL building, path-segment escaping, request/response bodies) depends on is
-// imported from here, never called bare.
+// Run usercode.js in workerd, expose the Apify binding, and push output.
+// guard.js must load first to install egress guards before user code runs.
+// Internal API access uses env.INTERNAL_API; user code never receives env.
+// Security-sensitive builtins come from guard.js captures.
 import {
     realObjectFreeze, setHas, numberIsFinite, mathMin, realNumber,
     encodeUriComponent, jsonStringify, responseOk, RealURL,
@@ -52,16 +12,10 @@ type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Re
 
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
 
-// The Apify API caps a single actor.call/run.waitForFinish wait at 60s
-// (a REST API limit, not this Actor's) — see docs/API.md's Recipes section
-// for the poll-in-a-loop pattern for longer runs.
+// Apify caps one wait request at 60 seconds.
 const DEFAULT_WAIT_FOR_FINISH_SECS = 60;
 
-// --- Types ---------------------------------------------------------------
-// The Apify API returns many more fields per record than this code reads. Rather
-// than inventing a full schema we don't have, ApifyRecord asserts nothing beyond
-// "a JSON object" and each specific shape below only names the fields this code
-// actually consumes.
+// Only fields consumed by this runtime are typed.
 
 interface ApifyRecord {
     [key: string]: unknown;
@@ -130,8 +84,7 @@ interface DatasetListOptions {
     desc?: boolean;
 }
 
-// One page, from a single request. Mirrors apify-client's PaginatedList shape (items, count,
-// offset, limit, desc) except `total`, which stays deliberately unsurfaced — see makePaginatedList.
+// One page returned by a paginated endpoint.
 interface ItemsPage<T> {
     items: T[];
     count: number;
@@ -143,9 +96,7 @@ interface DatasetItemsPage extends ItemsPage<ApifyRecord> {
     desc: boolean;
 }
 
-// Awaiting this value resolves to one page (ItemsPage); `for await`-ing it auto-paginates
-// through every item, one at a time. Same dual nature as apify-client's own PaginatedIterator
-// (one call, one name, two ways to consume it) — see makePaginatedList for the mechanism.
+// Await for one page; use for-await to consume all pages.
 type PaginatedItems<Page extends ItemsPage<unknown>> = Promise<Page> & AsyncIterable<Page['items'][number]>;
 
 interface DatasetSchemaOptions {
@@ -196,23 +147,13 @@ interface Env {
     DEFAULT_DATASET_ID?: string;
     DEFAULT_DATASET_ID_LEGACY?: string;
     API_BASE_URL?: string;
-    // APIFY_META_ORIGIN, forwarded from the platform's own env var of the same
-    // name (bound as PARENT_ORIGIN in config.capnp). Reflects this run's own
-    // meta.origin, set by apify-core from the X-Apify-Request-Origin request
-    // header the caller sent when creating THIS run — 'MCP' when apify-mcp-server
-    // started it. Platform-injected, not user-settable: unlike an Actor input
-    // field, a script running inside this Actor cannot spoof it.
+    // Platform-verified origin; user input cannot spoof it.
     PARENT_ORIGIN?: string;
-    // Execution-level safeguards on Actor runs a script starts via
-    // actor.start/call/callAndGetItems — see makeApifyBinding's `Limits` and
-    // docs/API.md's "Execution limits" section. All optional; unset means
-    // "no limit beyond the Apify API's own defaults".
+    // Optional limits for runs started by user code.
     MAX_ACTOR_RUNS?: string;
     MAX_TOTAL_CHARGE_USD?: string;
     DEFAULT_TIMEOUT_SECS?: string;
-    // Unrestricted (non-allowlisted) fetch for this worker's own calls to the
-    // platform-internal Apify API. Bound to a separate outbound network
-    // service in config.capnp — see this file's header comment and guard.ts.
+    // Separate network binding for internal API calls.
     INTERNAL_API: Fetcher;
 }
 
@@ -222,8 +163,6 @@ interface OutputItem {
     exitCode: number;
     statusMessage: string;
 }
-
-// ---------------------------------------------------------------------------
 
 function stringify(x: unknown): string {
     if (typeof x === 'string') return x;
@@ -238,21 +177,7 @@ function errorDetail(err: unknown): string {
     return err instanceof Error && err.stack ? err.stack : errorMessage(err);
 }
 
-// Wraps a page-fetcher into a value that's both a Promise (awaits to the first page) and an
-// AsyncIterable (walks every page, yielding one item at a time) — the same dual nature as
-// apify-client's own PaginatedIterator, implemented via the same trick it uses: attach
-// Symbol.asyncIterator to a live Promise object (a Promise is a plain object at runtime, so
-// this is legal, no class or wrapper needed).
-//
-// One shared implementation, unlike apify-client itself, which independently re-implements
-// this exact trick three times (dataset items, key-value-store keys, request-queue requests)
-// with three subtly different cursor/offset conventions — see docs/API.md's Conventions
-// section for that comparison. Every paginated method in this binding goes through this one
-// function instead.
-//
-// Continuation stops the same way the old dataset.iterate() did: a page shorter than the
-// limit it was asked for is the natural end-of-data signal (no dataset `total` is trusted —
-// see the listItems comment below for why).
+// Return one page as a Promise and all pages through async iteration.
 function makePaginatedList<T, Page extends ItemsPage<T>>(
     fetchPage: (offset: number, limit: number | undefined) => Promise<Page>,
     offset: number,
@@ -276,21 +201,12 @@ function makePaginatedList<T, Page extends ItemsPage<T>>(
     }) as PaginatedItems<Page>;
 }
 
-// 'MCP' matches apify-core's META_ORIGINS.MCP / apify-mcp-server's own
-// X-Apify-Request-Origin header value — reusing the platform's existing
-// convention rather than inventing a new one.
+// Matches apify-core's existing MCP request-origin value.
 const MCP_ORIGIN = 'MCP';
 const REQUEST_ORIGIN_HEADER = 'X-Apify-Request-Origin';
 
-// Execution-level safeguards on Actor runs a script starts (actor.start/call/
-// callAndGetItems, which all funnel through createRun() below). Independent of
-// any single run's own timeoutSecs/waitForFinishSecs/maxTotalChargeUsd, which
-// only bound THAT run — nothing previously bounded how many runs one script
-// could start, or their combined cost. See docs/API.md's "Execution limits".
+// Limits apply across runs started by one script.
 interface Limits {
-    // Always constructed with all three keys present (the fetch handler below never omits
-    // one) — `| undefined` documents "may be undefined" without implying a caller can leave
-    // the key out entirely, per this codebase's own `?` vs `| undefined` convention.
     maxActorRuns: number | undefined;
     maxTotalChargeUsd: number | undefined;
     defaultTimeoutSecs: number | undefined;
@@ -303,20 +219,13 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     internalFetch: Fetcher['fetch'];
     limits: Limits;
 }) {
-    // Every request this Actor makes identifies itself; requests made while THIS
-    // run's own origin is MCP additionally forward that origin so runs started by
-    // apify.actor.start/call/callAndGetItems() below get meta.origin: 'MCP' too,
-    // instead of the platform's default meta.origin: 'ACTOR' for actor-to-actor
-    // calls. Gated on parentOrigin (verified server-side, see the Env.PARENT_ORIGIN
-    // comment) rather than any Actor input, so a script can't forge an origin this
-    // run wasn't actually started with.
+    // Forward MCP origin only when platform metadata verified it.
     const baseHeaders: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         'User-Agent': 'apify-code-runtime',
         ...(parentOrigin === MCP_ORIGIN ? { [REQUEST_ORIGIN_HEADER]: MCP_ORIGIN } : {}),
     };
 
-    // Build a URL with optional query params; null/undefined values are dropped.
     const buildUrl = (path: string, searchParams?: SearchParams): URL => {
         const url = new RealURL(`${apiV2}${path}`);
         if (searchParams) {
@@ -327,8 +236,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         return url;
     };
 
-    // Single-source HTTP wrapper. Throws on non-2xx with the response body in the message.
-    // `body`: string / Uint8Array passed through; objects are JSON.stringify'd.
+    // Shared HTTP wrapper; errors include response bodies.
     const apiCall = async (method: string, path: string, options: ApiCallOptions = {}): Promise<Response> => {
         const { searchParams, body, contentType } = options;
         const headers: Record<string, string> = { ...baseHeaders };
@@ -350,58 +258,29 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         return response;
     };
 
-    // The Apify API's JSON envelope (`{ data: ... }`) carries whatever shape the endpoint
-    // returns; there's no schema to check it against here, so this stays honestly `any`
-    // rather than asserting a shape we haven't verified.
+    // API envelopes are untyped because endpoint shapes vary.
     const apiJson = async (method: string, path: string, options?: ApiCallOptions): Promise<any> =>
         (await apiCall(method, path, options)).json();
     const apiData = async (method: string, path: string, options?: ApiCallOptions): Promise<any> =>
         (await apiJson(method, path, options)).data;
 
-    // Run IDs this script itself started, via actor.call() / actor.start() (and transitively
-    // actor.callAndGetItems(), which shares createRun() below). run.abort() below is scoped to
-    // this set — a script can only abort runs it started, not any account-wide runId it's
-    // handed or guesses. Also used by abortTrackedRuns() (called from the top-level exception
-    // handler below) to clean up runs still going when the script itself crashed.
+    // Scope run.abort() and crash cleanup to runs started by this script.
     const startedRunIds = new Set<string>();
-    // Gates nonTerminalRunIds membership: createRun() (below) adds a run's id here unless its
-    // status is already one of these; waitForFinish() removes it once the status becomes one
-    // of these. A status in this set means this script no longer needs to track (and
-    // therefore abortTrackedRuns(), below, no longer needs to abort) that run. Deliberately
-    // broader than the API's own terminal-status set (docs/API.md's
-    // SUCCEEDED/FAILED/ABORTED/TIMED-OUT) by one: ABORTING means a run is already mid-abort
-    // (e.g. this script already called run.abort() on it), so re-aborting it would just be a
-    // redundant API call, not a real cleanup action.
+    // ABORTING needs no second abort; unknown statuses stay tracked conservatively.
     const DONE_TRACKING_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'ABORTING', 'TIMED-OUT']);
     const nonTerminalRunIds = new Set<string>();
 
-    // Conservative execution-level cost cap: each run's OWN maxTotalChargeUsd is a ceiling,
-    // not a bill, so this tracks committed ceilings (not realized spend) against
-    // limits.maxTotalChargeUsd and never lets a script authorize more combined ceiling than
-    // that budget, even though actual spend will usually be lower.
+    // Track committed run ceilings, not realized spend.
     let committedChargeUsd = 0;
-    // Separate from startedRunIds.size: reserved synchronously (see createRun below) so two
-    // concurrent createRun() calls — e.g. docs/API.md's own "Bounded parallel fan-out" recipe,
-    // `Promise.all(batch.map(() => apify.actor.start(...)))` — can't both read the
-    // pre-reservation count before either's POST resolves and both pass the cap check.
+    // Reserve synchronously so concurrent starts cannot bypass maxActorRuns.
     let reservedRunCount = 0;
 
-    // POST /acts/:id/runs, shared by actor.call() (start+wait, waitForFinishSecs defaults to
-    // DEFAULT_WAIT_FOR_FINISH_SECS, capped at 60s per the Apify API — for longer runs use
-    // start() + apify.run.waitForFinish()) and actor.start() (async kickoff, no wait). Returns
-    // the run record so the caller can read defaultDatasetId / defaultKeyValueStoreId.
-    // Intentionally does NOT use /run-sync, which returns the OUTPUT KVS record (a pattern
-    // only some Actors follow) rather than the structured run record.
+    // Start one Actor run; actor.call() and actor.start() share this path.
     const createRun = async ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }: StartOptions): Promise<RunRecord> => {
         if (limits.maxActorRuns !== undefined && reservedRunCount >= limits.maxActorRuns) {
             throw new Error(`Blocked actor run: this script already started/is starting ${reservedRunCount} Actor run(s), the configured limit is ${limits.maxActorRuns}`);
         }
-        // Reject a malformed script-supplied maxTotalChargeUsd before it ever reaches
-        // committedChargeUsd's arithmetic below: NaN in particular is silently absorbing —
-        // `NaN - anything` and `anything - NaN` both stay NaN, so a single bad call would
-        // permanently corrupt the running total and (since `NaN <= 0` is false) defeat the
-        // whole execution-level budget check for the rest of the script, with no way to
-        // recover it via the catch block's rollback (subtracting NaN from NaN is still NaN).
+        // Reject non-finite or non-positive caps before budget arithmetic.
         if (maxTotalChargeUsd !== undefined && !(numberIsFinite(maxTotalChargeUsd) && maxTotalChargeUsd > 0)) {
             throw new Error(`Invalid maxTotalChargeUsd: ${maxTotalChargeUsd} (must be a finite number greater than 0)`);
         }
@@ -411,13 +290,10 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             if (remaining <= 0) {
                 throw new Error(`Blocked actor run: execution spending budget of $${limits.maxTotalChargeUsd} is exhausted`);
             }
-            // A run without its own cap could spend the whole remaining budget; a run with
-            // its own cap higher than what's left gets clamped down to what's left.
+            // Uncapped runs consume the remainder; larger caps are clamped.
             effectiveMaxCharge = effectiveMaxCharge === undefined ? remaining : mathMin(effectiveMaxCharge, remaining);
         }
-        // Reserve BEFORE the network round-trip below (nothing here awaits yet, so this runs
-        // to completion in one synchronous tick relative to any other createRun() call — see
-        // the comment on reservedRunCount above for why that matters).
+        // Reserve before the network request to close the concurrency race.
         reservedRunCount += 1;
         if (effectiveMaxCharge !== undefined) committedChargeUsd += effectiveMaxCharge;
         try {
@@ -435,9 +311,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             if (!setHas(DONE_TRACKING_STATUSES, runRecord.status)) nonTerminalRunIds.add(runRecord.id);
             return runRecord;
         } catch (err) {
-            // The reservation never became a real run — release it, so a failed attempt
-            // (bad actorId, network error, ...) doesn't permanently eat into the script's
-            // run-count/budget allowance.
+            // Failed requests release their reservations.
             reservedRunCount -= 1;
             if (effectiveMaxCharge !== undefined) committedChargeUsd -= effectiveMaxCharge;
             throw err;
@@ -448,22 +322,11 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         get: ({ actorId }: ActorIdOptions): Promise<ApifyRecord> =>
             apiData('GET', `/acts/${encodeUriComponent(actorId)}`),
 
-        // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
-        // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
-        // can be scoped to runs this script itself started (see the run.abort definition below).
         call: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: DEFAULT_WAIT_FOR_FINISH_SECS, ...opts }),
 
-        // Async kickoff. Returns immediately with a run record in READY/RUNNING state.
         start: (opts: StartOptions): Promise<RunRecord> => createRun(opts),
 
-        // Runs an Actor (same as call(), waitForFinishSecs defaults to DEFAULT_WAIT_FOR_FINISH_SECS)
-        // and returns its dataset items in one call. Calls createRun() directly rather than
-        // through `actor.call()` — same underlying request, no self-reference to `actor` needed.
-        //
-        // If the run is still RUNNING when the wait elapses, this reads whatever the dataset
-        // holds at that moment — items may be empty or a partial subset of the eventual total.
-        // Check `run.status` (returned alongside `items`); a non-terminal status means the
-        // items are a snapshot, not the final result — see docs/API.md.
+        // Start, wait up to 60 seconds, and read a dataset snapshot.
         callAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
             const runRecord = await createRun({ actorId, input, waitForFinishSecs: DEFAULT_WAIT_FOR_FINISH_SECS, ...runOpts });
             const { items } = await dataset.listItems({
@@ -477,8 +340,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         get: ({ runId }: RunIdOptions): Promise<RunRecord> =>
             apiData('GET', `/actor-runs/${encodeUriComponent(runId)}`),
 
-        // Block until the run terminates or `waitForFinishSecs` elapses (whichever comes first).
-        // The Apify API caps this at 60s per request; longer waits require a polling loop.
+        // Wait for termination or the API's 60-second cap.
         waitForFinish: async ({ runId, waitForFinishSecs = DEFAULT_WAIT_FOR_FINISH_SECS }: WaitOptions): Promise<RunRecord> => {
             const runRecord: RunRecord = await apiData('GET', `/actor-runs/${encodeUriComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
@@ -487,9 +349,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             return runRecord;
         },
 
-        // Scoped to runs this script itself started (see startedRunIds above) — without this,
-        // any runId a script is handed (e.g. read from a dataset item, or guessed) could abort
-        // an unrelated, account-wide run.
+        // Only runs started by this script may be aborted.
         abort: ({ runId }: RunIdOptions): Promise<RunRecord> => {
             if (!setHas(startedRunIds, runId)) {
                 throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
@@ -498,8 +358,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             return apiData('POST', `/actor-runs/${encodeUriComponent(runId)}/abort`);
         },
 
-        // Returns the full run log as text. `limit` tails the last N characters; the Apify API
-        // does not paginate logs, so this is a client-side slice (the full body is fetched).
+        // Return the full log, optionally limited to its last N characters.
         getLog: async ({ runId, limit }: GetLogOptions): Promise<string> => {
             const response = await apiCall('GET', `/logs/${encodeUriComponent(runId)}`);
             const text = await response.text();
@@ -508,14 +367,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     };
 
     const dataset = {
-        // `await` resolves to one page: { items, count, offset, limit, desc }. `for await`
-        // auto-paginates through the entire dataset, one item at a time (replaces the old,
-        // separate dataset.iterate() method — see makePaginatedList). offset/limit/desc echo
-        // back what the API actually applied (read from its x-apify-pagination-* response
-        // headers, not just the request), except `total`: the Apify API's
-        // `x-apify-pagination-total` header is unreliable for freshly-created datasets
-        // (eventually consistent), so it's never surfaced — `count` (this page's actual item
-        // count) is what you want instead. Use `inferFields` if you need an approximate total.
+        // Await for one page; for-await iterates all pages.
         listItems: ({ datasetId, fields, omit, limit, offset = 0, clean, desc }: DatasetListOptions): PaginatedItems<DatasetItemsPage> => {
             const fetchPage = async (pageOffset: number, pageLimit?: number): Promise<DatasetItemsPage> => {
                 const response = await apiCall('GET', `/datasets/${encodeUriComponent(datasetId)}/items`, {
@@ -540,9 +392,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             return makePaginatedList(fetchPage, offset, limit);
         },
 
-        // Apify has no dedicated schema endpoint; we infer one from a small sample of items.
-        // Named inferFields (not getSchema) to avoid colliding with the Actor's own *declared*
-        // dataset schema (a different concept, described in this Actor's own actor.json).
+        // Infer fields from a sample because the API has no schema endpoint.
         inferFields: async ({ datasetId, sample = DEFAULT_GET_SCHEMA_SAMPLE }: DatasetSchemaOptions): Promise<DatasetSchema> => {
             const meta = await apiData('GET', `/datasets/${encodeUriComponent(datasetId)}`);
             const { items } = await dataset.listItems({ datasetId, limit: sample });
@@ -574,9 +424,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     };
 
     const keyValueStore = {
-        // Returns the value directly (parsed when JSON, string when text/*, Uint8Array otherwise).
-        // Returns null when the key does not exist (404), not an error — this matches the common
-        // "lookup or default" pattern in code.
+        // Parse JSON/text values; return null for a missing key.
         get: async ({ storeId, key }: KeyValueStoreGetOptions): Promise<unknown> => {
             const response = await internalFetch(buildUrl(`/key-value-stores/${encodeUriComponent(storeId)}/records/${encodeUriComponent(key)}`), {
                 headers: baseHeaders,
@@ -589,8 +437,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             return new Uint8Array(await response.arrayBuffer());
         },
 
-        // `value`: object → application/json; string → text/plain; Uint8Array/ArrayBuffer →
-        // application/octet-stream (or whatever the caller passed via `contentType`).
+        // Objects, strings, and binary values use matching content types.
         set: async ({ storeId, key, value, contentType }: KeyValueStoreSetOptions): Promise<void> => {
             let body: BodyInit;
             let resolvedContentType = contentType;
@@ -619,12 +466,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             apiData('POST', '/key-value-stores', { searchParams: { name } }),
     };
 
-    // GET /v2/store — Apify Store search (a top-level resource in the Apify API,
-    // tagged `Store`, distinct from `Actors` — hence a top-level binding rather
-    // than an `actor.*` method). Same dual nature as dataset.listItems: `await` for one
-    // page, `for await` to walk every match. offset/limit echo back the request (the
-    // endpoint's own JSON body doesn't carry pagination metadata beyond `items`, unlike
-    // dataset's header-based pagination — see makePaginatedList).
+    // Search the top-level Store resource with the shared paginator.
     const store = ({ search, limit, offset = 0, category }: StoreSearchOptions): PaginatedItems<ItemsPage<ApifyRecord>> => {
         const fetchPage = async (pageOffset: number, pageLimit: number | undefined): Promise<ItemsPage<ApifyRecord>> => {
             const page = await apiData('GET', '/store', { searchParams: { search, limit: pageLimit, offset: pageOffset, category } });
@@ -634,22 +476,14 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         return makePaginatedList(fetchPage, offset, limit);
     };
 
-    // Best-effort cleanup for runs this script started but left non-terminal (e.g. the
-    // script itself threw with a run still in progress). Not part of the frozen `apify`
-    // binding handed to user code — called directly by the top-level exception handler
-    // below. One bad abort must not stop the others (the run tracking loop's whole point is
-    // to catch stragglers after an error): a run that already finished on the platform
-    // between our last check and now is an *expected* abort failure (the API rejects
-    // aborting a finished run), not a bug, so failures are reported back for logging, never
-    // thrown.
+    // Best-effort cleanup; one failed abort must not stop the others.
     const abortTrackedRuns = async (): Promise<{ runId: string; error: string }[]> => {
         const runIds = [...nonTerminalRunIds];
         const results = await Promise.allSettled(runIds.map((runId) => run.abort({ runId })));
         return results.flatMap((result, i) => result.status === 'rejected' ? [{ runId: runIds[i], error: errorMessage(result.reason) }] : []);
     };
 
-    // Freeze every namespace (and the wrapper) so the script can't reassign a method to
-    // corrupt its own behavior or, for `console` below, its own output capture.
+    // Freeze the binding so user code cannot replace its methods.
     const binding = realObjectFreeze({
         actor: realObjectFreeze(actor),
         store,
@@ -660,12 +494,9 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
     return { binding, abortTrackedRuns };
 }
 
-// The shape handed to user code as the `apify` binding. Exported (type-only —
-// erased at compile time) so tests/*.ts can type-check probes against the same
-// surface real usercode.js runs against, without importing runner.ts at runtime.
+// Type-only binding surface used by tests.
 export type ApifyBinding = ReturnType<typeof makeApifyBinding>['binding'];
 
-// Push the captured streams as a single item to the run's default dataset.
 async function pushOutput({ apiV2, token, internalFetch, env, item }: {
     apiV2: string;
     token: string;
@@ -683,22 +514,14 @@ async function pushOutput({ apiV2, token, internalFetch, env, item }: {
     if (!responseOk(response)) throw new Error(`Failed to push dataset item: ${response.status} ${await response.text()}`);
 }
 
-// Parses an optional positive-number env var (as set by entrypoint.sh from Actor input).
-// Absent or blank means "field omitted" -> no limit, matching .actor/actor.json's own
-// description for each field. The platform validates the input schema's types/minimums
-// before this code ever runs, so non-numeric/non-positive shouldn't reach here in
-// practice — treating it as "no limit" rather than crashing is a deliberate fallback for
-// that already-unlikely case, not a substitute for the schema validation.
+// Blank or invalid values mean no configured limit.
 function parsePositiveNumberEnv(value: string | undefined): number | undefined {
     if (!value) return undefined;
     const parsed = realNumber(value);
     return numberIsFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-// Frozen so escaped usercode.js module-scope code (which shares this module's namespace via
-// `import('./runner.js')`, the same reachability every export in this file has — see guard.ts's
-// header comment) can't reassign `.fetch` to a wrapper that captures the real `request`/`env`
-// (APIFY_TOKEN, INTERNAL_API) the next time workerd genuinely dispatches to this worker.
+// Freeze fetch so escaped module code cannot replace it.
 export default realObjectFreeze({
     async fetch(request: Request, env: Env): Promise<Response> {
         const url = new RealURL(request.url);
@@ -707,7 +530,6 @@ export default realObjectFreeze({
 
         const token = env.APIFY_TOKEN;
         if (!token) throw new Error('APIFY_TOKEN missing from Actor run environment.');
-        // APIFY_API_BASE_URL is the platform-internal API (may have a trailing slash).
         const apiV2 = `${(env.API_BASE_URL || 'https://api.apify.com').replace(/\/+$/, '')}/v2`;
         const internalFetch: Fetcher['fetch'] = (input, init) => env.INTERNAL_API.fetch(input, init);
 
@@ -719,7 +541,7 @@ export default realObjectFreeze({
 
         const stdout: string[] = [];
         const stderr: string[] = [];
-        // Frozen so the script can't reassign e.g. console.log to corrupt its own capture.
+        // Freeze the captured console methods.
         const captureConsole: ConsoleLike = realObjectFreeze({
             log:   (...args: unknown[]) => stdout.push(args.map(stringify).join(' ')),
             error: (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),
@@ -729,18 +551,7 @@ export default realObjectFreeze({
 
         const { binding, abortTrackedRuns } = makeApifyBinding({ token, apiV2, parentOrigin: env.PARENT_ORIGIN, internalFetch, limits });
 
-        // A thrown program is a user-level failure: capture it in stderr and still
-        // push the output, so the run SUCCEEDS with diagnostics. Infra failures
-        // (missing env, dataset push) throw and fail the run.
-        //
-        // exitCode is the user script's effective status, distinct from the Actor run's
-        // status: 0 when the script returns normally, 1 when it throws. The run itself
-        // still SUCCEEDS on a throw, so callers detect a failed script via this field
-        // rather than heuristics on stderr (console.error is a legitimate log channel).
-        // statusMessage carries the same signal in prose, for callers that don't want to
-        // branch on exitCode. A script that fails to *compile* never reaches this handler at
-        // all (workerd fails the whole run before any request arrives) — entrypoint.sh
-        // handles that case directly, see its statusMessage "Failed to compile: ...".
+        // User errors become diagnostics; infrastructure errors fail the run.
         let exitCode = 0;
         let statusMessage = 'Script completed';
         try {
@@ -749,9 +560,7 @@ export default realObjectFreeze({
             stderr.push(errorDetail(err));
             exitCode = 1;
             statusMessage = `Script threw: ${errorMessage(err)}`;
-            // Best-effort: a script that started Actor runs and then crashed shouldn't leave
-            // them running unattended. Failures here don't change exitCode/statusMessage —
-            // the script's own failure is the primary signal; cleanup is secondary.
+            // Cleanup failures are diagnostics, not a second script failure.
             const abortFailures = await abortTrackedRuns();
             for (const { runId, error } of abortFailures) {
                 stderr.push(`Cleanup: failed to abort run ${runId}: ${error}`);
