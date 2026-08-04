@@ -42,6 +42,22 @@ describe('isAllowedHost', () => {
     ])('%s -> %s', (hostname, expected) => {
         expect(guard.isAllowedHost(hostname)).toBe(expected);
     });
+
+    // Regression test for a real bypass found in review: isAllowedHost used to call
+    // `hostname.toLowerCase()`/`.endsWith()` directly, resolving through the live,
+    // ordinary-script-writable `String.prototype` — no module-scope escape needed. See
+    // guard.ts's capture-block comment for the fix (capture the actual method functions,
+    // call them via .call() instead of value.method()).
+    it('still rejects a disallowed host after String.prototype.endsWith is poisoned', () => {
+        const original = String.prototype.endsWith;
+        // eslint-disable-next-line no-extend-native -- deliberately simulating the attack this test guards against
+        String.prototype.endsWith = () => true;
+        try {
+            expect(guard.isAllowedHost('evil.com')).toBe(false);
+        } finally {
+            String.prototype.endsWith = original;
+        }
+    });
 });
 
 describe('validateUrl', () => {
@@ -75,6 +91,25 @@ describe('validateUrl', () => {
 
     it('resolves a Request object by its .url', () => {
         expect(guard.validateUrl(new Request('https://apify.com/x')).hostname).toBe('apify.com');
+    });
+
+    // Regression test for a real bypass found in review: validateUrl used to call the bare
+    // `new URL(...)`, which resolves whatever `globalThis.URL` currently is. A script that
+    // replaces it with a lying implementation (real .href, faked .hostname) could make
+    // validateUrl believe a disallowed host was apify.com, with no module-scope-escape trick
+    // needed at all — see guard.ts's capture-block comment for the fix (capture the real URL
+    // constructor before usercode.js can ever run).
+    it('still rejects a disallowed host after globalThis.URL is replaced with a lying constructor', () => {
+        const OriginalURL = globalThis.URL;
+        class LyingURL extends OriginalURL {
+            get hostname() { return 'apify.com'; }
+        }
+        globalThis.URL = LyingURL;
+        try {
+            expect(() => guard.validateUrl('http://example.com/')).toThrow(/only apify\.com/);
+        } finally {
+            globalThis.URL = OriginalURL;
+        }
     });
 });
 
@@ -191,33 +226,66 @@ describe('module exports', () => {
     it('never exports a raw/unrestricted fetch capability', () => {
         // Regression guard for PR #1's finding: guard.js must never export anything that
         // hands the caller an unwrapped fetch function or a way to bypass the allowlist.
-        // Every export must be one of these known-safe, pure helpers (realObjectFreeze is
-        // safe by the same reasoning: it's still just Object.freeze, the concept carries no
-        // capability — see its own comment in guard.ts for why it needs to be exported at all).
-        const knownSafeExports = new Set(['isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch', 'realObjectFreeze']);
+        // Every export must be one of these known-safe, pure helpers — realObjectFreeze/
+        // setHas/numberIsFinite/mathMin are safe by the same reasoning: each is still just
+        // the ordinary builtin operation, the concept itself carries no capability. See
+        // guard.ts's capture-block comment for why they need to be exported at all.
+        const knownSafeExports = new Set([
+            'isAllowedHost', 'validateUrl', 'nextRedirectInit', 'guardedFetch',
+            'realObjectFreeze', 'setHas', 'numberIsFinite', 'mathMin',
+        ]);
         for (const key of Object.keys(guard)) {
             expect(knownSafeExports.has(key)).toBe(true);
         }
     });
 });
 
-describe('validateUrl resists a hijacked global URL constructor', () => {
-    // Regression test for a real bypass found in review: validateUrl used to call the bare
-    // `new URL(...)`, which resolves whatever `globalThis.URL` currently is. A script that
-    // replaces it with a lying implementation (real .href, faked .hostname) could make
-    // validateUrl believe a disallowed host was apify.com, with no module-scope-escape trick
-    // needed at all — see guard.ts's RealURL comment for the fix (capture URL before
-    // usercode.js can ever run).
-    it('still rejects a disallowed host after globalThis.URL is replaced with a lying constructor', () => {
-        const OriginalURL = globalThis.URL;
-        class LyingURL extends OriginalURL {
-            get hostname() { return 'apify.com'; }
-        }
-        globalThis.URL = LyingURL;
+// Regression tests for guard.ts's capture-block: capturing a builtin's *reference* only
+// protects against `globalThis.X = somethingElse`. It does NOT protect a shared PROTOTYPE
+// method or static function (`X.prototype.method = ...`, `Number.isFinite = ...`), which
+// stays reachable through the still-live global name even if some OTHER code holds a
+// captured constructor reference — a captured URL constructor's `.prototype` IS the same
+// mutable object as the global `URL.prototype`. Each capture below needs its own resistance
+// test; sharing one wouldn't prove the others are covered.
+describe('captured builtins resist prototype/static-method poisoning', () => {
+    it('realObjectFreeze still freezes after the global Object.freeze is replaced with a no-op', () => {
+        const original = Object.freeze;
+        Object.freeze = (<T>(o: T) => o) as typeof Object.freeze; // simulates a hijacked global, not a real no-op call site
         try {
-            expect(() => guard.validateUrl('http://example.com/')).toThrow(/only apify\.com/);
+            const obj = guard.realObjectFreeze({ x: 1 });
+            expect(Object.isFrozen(obj)).toBe(true);
         } finally {
-            globalThis.URL = OriginalURL;
+            Object.freeze = original;
+        }
+    });
+
+    it('setHas still reports true membership after Set.prototype.has is poisoned to always return false', () => {
+        const original = Set.prototype.has;
+        Set.prototype.has = () => false;
+        try {
+            expect(guard.setHas(new Set(['a']), 'a')).toBe(true);
+        } finally {
+            Set.prototype.has = original;
+        }
+    });
+
+    it('numberIsFinite still rejects Infinity after the global Number.isFinite is poisoned to always return true', () => {
+        const original = Number.isFinite;
+        Number.isFinite = () => true;
+        try {
+            expect(guard.numberIsFinite(Infinity)).toBe(false);
+        } finally {
+            Number.isFinite = original;
+        }
+    });
+
+    it('mathMin still returns the real minimum after the global Math.min is poisoned', () => {
+        const original = Math.min;
+        Math.min = (a) => a; // always "returns the first argument", the wrong answer when a > b
+        try {
+            expect(guard.mathMin(5, 2)).toBe(2);
+        } finally {
+            Math.min = original;
         }
     });
 });

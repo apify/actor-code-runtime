@@ -33,12 +33,13 @@
 // test for this: it fails loudly (`allow https://example.com/` check reports NOT blocked)
 // if this import is ever missing or reordered.
 //
-// realObjectFreeze (used below instead of the bare global `Object.freeze`) is guard.js's
-// own pre-captured reference, for the same reason: this file's Object.freeze calls are
-// top-level code that runs AFTER usercode.js's module body, so a script could otherwise
-// shadow the global `Object.freeze` to a no-op before any of them ever run. See guard.ts's
-// comment on realObjectFreeze.
-import { realObjectFreeze } from './guard.js';
+// realObjectFreeze/setHas/numberIsFinite/mathMin below are guard.js's own pre-captured
+// builtin references (see the capture block at the top of guard.ts for the full reasoning):
+// this file's own top-level code, and every function it defines, run AFTER usercode.js's
+// module body (import order), so a script can shadow/poison any of these globals — or their
+// prototypes — before this file ever uses them, unless it uses guard.js's captured
+// equivalents instead of calling them bare.
+import { realObjectFreeze, setHas, numberIsFinite, mathMin } from './guard.js';
 import { run } from './usercode.js';
 
 type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
@@ -395,7 +396,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         // permanently corrupt the running total and (since `NaN <= 0` is false) defeat the
         // whole execution-level budget check for the rest of the script, with no way to
         // recover it via the catch block's rollback (subtracting NaN from NaN is still NaN).
-        if (maxTotalChargeUsd !== undefined && !(Number.isFinite(maxTotalChargeUsd) && maxTotalChargeUsd > 0)) {
+        if (maxTotalChargeUsd !== undefined && !(numberIsFinite(maxTotalChargeUsd) && maxTotalChargeUsd > 0)) {
             throw new Error(`Invalid maxTotalChargeUsd: ${maxTotalChargeUsd} (must be a finite number greater than 0)`);
         }
         let effectiveMaxCharge = maxTotalChargeUsd;
@@ -406,7 +407,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             }
             // A run without its own cap could spend the whole remaining budget; a run with
             // its own cap higher than what's left gets clamped down to what's left.
-            effectiveMaxCharge = effectiveMaxCharge === undefined ? remaining : Math.min(effectiveMaxCharge, remaining);
+            effectiveMaxCharge = effectiveMaxCharge === undefined ? remaining : mathMin(effectiveMaxCharge, remaining);
         }
         // Reserve BEFORE the network round-trip below (nothing here awaits yet, so this runs
         // to completion in one synchronous tick relative to any other createRun() call — see
@@ -425,7 +426,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
                 body: input ?? {},
             });
             startedRunIds.add(runRecord.id);
-            if (!DONE_TRACKING_STATUSES.has(runRecord.status)) nonTerminalRunIds.add(runRecord.id);
+            if (!setHas(DONE_TRACKING_STATUSES, runRecord.status)) nonTerminalRunIds.add(runRecord.id);
             return runRecord;
         } catch (err) {
             // The reservation never became a real run — release it, so a failed attempt
@@ -476,7 +477,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
             const runRecord: RunRecord = await apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
             });
-            if (DONE_TRACKING_STATUSES.has(runRecord.status)) nonTerminalRunIds.delete(runId);
+            if (setHas(DONE_TRACKING_STATUSES, runRecord.status)) nonTerminalRunIds.delete(runId);
             return runRecord;
         },
 
@@ -484,7 +485,7 @@ function makeApifyBinding({ token, apiV2, parentOrigin, internalFetch, limits }:
         // any runId a script is handed (e.g. read from a dataset item, or guessed) could abort
         // an unrelated, account-wide run.
         abort: ({ runId }: RunIdOptions): Promise<RunRecord> => {
-            if (!startedRunIds.has(runId)) {
+            if (!setHas(startedRunIds, runId)) {
                 throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
             }
             nonTerminalRunIds.delete(runId);
@@ -685,7 +686,7 @@ async function pushOutput({ apiV2, token, internalFetch, env, item }: {
 function parsePositiveNumberEnv(value: string | undefined): number | undefined {
     if (!value) return undefined;
     const parsed = Number(value);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    return numberIsFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 // Frozen so escaped usercode.js module-scope code (which shares this module's namespace via

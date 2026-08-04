@@ -31,33 +31,48 @@
 // no longer needs to capture or export a privileged fetch at all.
 const realFetch = globalThis.fetch.bind(globalThis);
 
-// Captured before usercode.js's module body ever runs (see runner.ts's import-order
-// comment — guard.js's own top-level code, including this line, always finishes first).
-// `new URL(...)` and `instanceof URL` below resolve the identifier `URL` from scope, which
-// is just `globalThis.URL` — an ordinary, reassignable global. A script that replaces it
-// (`globalThis.URL = class FakeURL extends URL { get hostname() { return 'apify.com'; } }`)
-// would make every validation call below trust a lying parser while the *string* actually
-// handed to realFetch is untouched, defeating the allowlist with no module-scope-escape
-// trick needed at all — this file's own `Object.defineProperty(globalThis, 'fetch', ...)`
-// below is exactly this same "capture the real one before a script can swap it" pattern,
-// applied here to the other builtin this file's security check depends on.
+// Every name below is captured HERE, at guard.js's own module-evaluation time — which
+// always finishes before usercode.js's module body ever runs (see runner.ts's import-order
+// comment) — because an ordinary script, no module-scope escape needed, can reassign or
+// monkey-patch any JS builtin this file's (or runner.ts's) security decisions depend on.
+// Two different attacks, both closed the same way:
+//   - Reassigning the global itself (`globalThis.URL = FakeClass`,
+//     `globalThis.Object.freeze = noop`) — defeated by capturing a direct reference before
+//     a script gets the chance to reassign it. `RealURL`/`realObjectFreeze` below.
+//   - Poisoning a shared PROTOTYPE method or static function (`String.prototype.endsWith =
+//     () => true`, `Number.isFinite = () => true`, `Set.prototype.has = () => true`) — a
+//     captured *constructor* reference does NOT protect this: `RealURL.prototype` IS
+//     `URL.prototype`, the same mutable object reachable through the still-live global
+//     name. The only fix is capturing the METHOD/FUNCTION itself, then invoking it
+//     directly (`stringEndsWith.call(host, suffix)`) instead of through the poisonable
+//     `value.method()` syntax. `setHas`/`numberIsFinite`/`mathMin` and the string helpers
+//     used by `isAllowedHost` below are all this second kind.
+// This block is the audit surface for that whole trust boundary: anything guard.ts or
+// runner.ts uses to make a security/allowlist/ownership decision belongs here, not called
+// bare — three real bypasses of exactly this shape were found in review (PR #1, rounds
+// 2026-07-21 through 2026-08-04) before this was made systematic.
 const RealURL = globalThis.URL;
-
-// Same capture-before-usercode-runs reasoning, for a different consumer: runner.ts's own
-// `Object.freeze(...)` calls (on the `apify` binding, `console`, and its default export) are
-// top-level code that runs AFTER usercode.js's module body (see runner.ts's import-order
-// comment), so escaped top-level code could reassign the global `Object.freeze` to a no-op
-// before runner.ts ever calls it — silently defeating every "frozen so the script can't
-// reassign this" guarantee there. Exporting a pre-captured reference is safe (it's still
-// just Object.freeze; the concept itself carries no capability) and closes that gap.
 export const realObjectFreeze: typeof Object.freeze = Object.freeze.bind(Object);
+const stringToLowerCase = String.prototype.toLowerCase;
+const stringEndsWith = String.prototype.endsWith;
+const stringSlice = String.prototype.slice;
+const setHasMethod = Set.prototype.has;
+export const setHas = <T>(set: ReadonlySet<T>, value: T): boolean => setHasMethod.call(set, value);
+export const numberIsFinite: (value: unknown) => boolean = Number.isFinite;
+export const mathMin: (a: number, b: number) => number = Math.min;
 
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
-// (ends with `.evil.com`) both fail.
+// (ends with `.evil.com`) both fail. Uses the captured string-method references above (see
+// this file's capture block), not `hostname.toLowerCase()`/`.endsWith()` directly — those
+// resolve through the live, poisonable `String.prototype` at call time.
 export function isAllowedHost(hostname: string): boolean {
-    const host = hostname.toLowerCase().replace(/\.$/, ''); // strip FQDN trailing dot
-    return host === 'apify.com' || host.endsWith('.apify.com');
+    const lowercased: string = stringToLowerCase.call(hostname);
+    // Strip a trailing FQDN dot (`apify.com.` -> `apify.com`) via slice, not `.replace(/\.$/, '')`
+    // — same captured-primitive reasoning as everything else in this block, one fewer method
+    // to capture.
+    const host: string = stringEndsWith.call(lowercased, '.') ? stringSlice.call(lowercased, 0, -1) : lowercased;
+    return host === 'apify.com' || stringEndsWith.call(host, '.apify.com');
 }
 
 function requestUrl(input: RequestInfo | URL): string {
@@ -113,7 +128,7 @@ async function guardedFetchHop(input: RequestInfo | URL, init: RequestInit | und
     }
     const url = validateUrl(input);
     const response = await realFetch(input, { ...init, redirect: 'manual' });
-    if (!REDIRECT_STATUSES.has(response.status)) return response;
+    if (!setHas(REDIRECT_STATUSES, response.status)) return response;
     const location = response.headers.get('location');
     if (!location) return response; // redirect status with no Location: nothing to follow
     const nextUrl = new RealURL(location, url); // resolves a relative Location against the current URL

@@ -137,6 +137,18 @@ describe('execution-limit safeguards fire under real (including concurrent) use'
         expect(result.pushedItem?.stdout).toBe('firstFailed=true secondSucceeded=true');
     });
 
+    it('rejects a non-finite/non-positive maxTotalChargeUsd before it touches the budget', async () => {
+        const result = await runScript(`
+            try {
+                await apify.actor.start({ actorId: 'apify/hello-world', maxTotalChargeUsd: NaN });
+                console.log('LEAK: did not throw');
+            } catch (e) {
+                console.log('error: ' + e.message);
+            }
+        `);
+        expect(result.pushedItem?.stdout).toMatch(/^error: Invalid maxTotalChargeUsd/);
+    });
+
     it('actor.callAndGetItems does not double-count against maxActorRuns', async () => {
         const result = await runScript(`
             const { run, items } = await apify.actor.callAndGetItems({ actorId: 'apify/hello-world', limit: 5 });
