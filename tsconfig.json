@@ -6,5 +6,10 @@
         "lib": ["es2022", "dom"],
         "strict": true
     },
+    // tests/integration/*.ts is genuine Node (spawns workerd, uses fs/child_process) and
+    // typechecks separately under tsconfig.integration.json instead: this program's other
+    // files model the workerd/no-nodejs_compat environment (see tests/globals.d.ts, which
+    // declares `process`/`require` as absent) — @types/node's real ambient `process`/`require`
+    // globals would collide with that if both lived in one program.
     "include": ["worker/*.ts", "tests/*.ts", "tests/unit/*.ts"]
 }

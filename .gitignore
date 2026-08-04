@@ -6,5 +6,6 @@ worker/runner.js
 worker/guard.js
 tests/*.js
 tests/unit/*.js
+tests/integration/*.js
 *.log
 .DS_Store

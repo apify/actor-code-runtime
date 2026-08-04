@@ -82,7 +82,10 @@ export function nextRedirectInit(init: RequestInit | undefined, status: number):
     return { ...init, method: 'GET', body: undefined };
 }
 
-export async function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined, hop = 0): Promise<Response> {
+// `hop` is an internal recursion counter, not part of the public contract — kept unexported
+// so a caller (including escaped usercode.js, which can import and call any export of this
+// module) can't pass a pre-inflated or negative value to defeat MAX_REDIRECT_HOPS.
+async function guardedFetchHop(input: RequestInfo | URL, init: RequestInit | undefined, hop: number): Promise<Response> {
     if (hop > MAX_REDIRECT_HOPS) {
         throw new Error(`Blocked fetch: exceeded ${MAX_REDIRECT_HOPS} redirects`);
     }
@@ -92,7 +95,11 @@ export async function guardedFetch(input: RequestInfo | URL, init: RequestInit |
     const location = response.headers.get('location');
     if (!location) return response; // redirect status with no Location: nothing to follow
     const nextUrl = new URL(location, url); // resolves a relative Location against the current URL
-    return guardedFetch(nextUrl.href, nextRedirectInit(init, response.status), hop + 1);
+    return guardedFetchHop(nextUrl.href, nextRedirectInit(init, response.status), hop + 1);
+}
+
+export function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined): Promise<Response> {
+    return guardedFetchHop(input, init, 0);
 }
 
 // writable:false + configurable:false, matching blockGlobal() below — a plain

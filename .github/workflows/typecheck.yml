@@ -33,3 +33,22 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test
+
+  # Boots a real workerd process against the actual compiled worker/*.js (not a mock) — the
+  # only thing that can catch "guard.js's logic is correct but never actually wired into the
+  # module graph" (a real regression found in review) or "the execution-limit safeguards look
+  # right but don't hold under concurrent use" (another real regression found in review). See
+  # tests/integration/workerd-e2e.test.ts's own header comment. Still token-free/offline — the
+  # internal Apify API is a local mock (tests/integration/harness.ts), no live platform needed.
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm run test:integration

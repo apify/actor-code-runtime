@@ -166,10 +166,17 @@ describe('guardedFetch', () => {
         expect(secondInit.body).toBeUndefined();
     });
 
-    it('gives up after MAX_REDIRECT_HOPS redirects to allowed hosts', async () => {
+    it('gives up after exactly MAX_REDIRECT_HOPS redirects to allowed hosts', async () => {
+        // MAX_REDIRECT_HOPS is module-private (not exported — see guard.ts's own comment on
+        // why nothing beyond the pure allowlist helpers is), so this pins the boundary by its
+        // observable effect instead: guard.ts's `hop > MAX_REDIRECT_HOPS` check means calls at
+        // hop 0..5 each make a real fetch (6 calls, MAX_REDIRECT_HOPS=5 + the initial request)
+        // before hop 6 throws without calling fetch again. A change to MAX_REDIRECT_HOPS's
+        // value, or an off-by-one in the `>` check, changes this exact count.
         mockFetch.mockClear();
         for (let i = 0; i < 10; i++) mockFetch.mockResolvedValueOnce(redirectResponse('https://apify.com/loop', 302));
-        await expect(guard.guardedFetch('https://apify.com/start', undefined)).rejects.toThrow(/exceeded/);
+        await expect(guard.guardedFetch('https://apify.com/start', undefined)).rejects.toThrow(/exceeded 5 redirects/);
+        expect(mockFetch).toHaveBeenCalledTimes(6);
     });
 
     it('returns a redirect response unchanged when it carries no Location header', async () => {
