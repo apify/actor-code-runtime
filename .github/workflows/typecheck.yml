@@ -1,4 +1,4 @@
-name: Typecheck
+name: Typecheck and test
 
 on:
   push:
@@ -17,3 +17,19 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
+
+  # Token-free unit tests (guard.ts's allowlist/redirect logic) — no `apify push`/`apify
+  # call`, no live Actor run, no APIFY_TOKEN. See tests/unit/guard.test.ts's own header
+  # comment for what this covers and why it exists (PR #1 review, 2026-07-21: the security
+  # boundary itself had zero CI coverage before this).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run test

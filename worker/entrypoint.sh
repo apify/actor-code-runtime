@@ -37,6 +37,14 @@ fi
     printf '\n}\n'
 } > /app/worker/usercode.js
 
+# Execution-level safeguards (all optional Actor input fields — see runner.ts's Limits and
+# docs/API.md's "Execution limits"). `// empty` yields an empty string (not "0"/"null") when
+# the field is absent; runner.ts's parsePositiveNumberEnv treats a blank value as "no limit
+# configured".
+export CODE_RUNTIME_MAX_ACTOR_RUNS="$(jq -r '.maxActorRuns // empty' < /tmp/input.json)"
+export CODE_RUNTIME_MAX_TOTAL_CHARGE_USD="$(jq -r '.maxTotalChargeUsd // empty' < /tmp/input.json)"
+export CODE_RUNTIME_DEFAULT_TIMEOUT_SECS="$(jq -r '.defaultTimeoutSecs // empty' < /tmp/input.json)"
+
 # config.capnp hardcodes __PORT__ as a placeholder so the port has one source ($PORT above).
 sed -i "s/__PORT__/${PORT}/" /app/worker/config.capnp
 

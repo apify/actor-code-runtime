@@ -12,9 +12,11 @@
     },
     "scripts": {
         "build": "tsc -p tsconfig.json && sed -i '/^export {};$/d' tests/*.js",
-        "typecheck": "tsc --noEmit -p tsconfig.json"
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "vitest run"
     },
     "devDependencies": {
-        "typescript": "6.0.3"
+        "typescript": "6.0.3",
+        "vitest": "4.1.10"
     }
 }

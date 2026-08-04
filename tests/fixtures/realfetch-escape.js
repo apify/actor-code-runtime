@@ -1,6 +1,6 @@
-// Regression probe for the realFetch claim-ordering bug found in PR #1's
-// review (2026-07-21):
-// https://github.com/apify/actor-code-runtime/pull/1#issuecomment-5037390847
+// Regression probe for the guard.js capability-theft bug found in PR #1 review
+// (2026-07-21, and again 2026-08-01 against the first attempted fix):
+// https://github.com/apify/actor-code-runtime/pull/1#discussion_r3707244830
 //
 // entrypoint.sh splices `code` verbatim (no escaping) into
 // `export async function run(apify, console) { <code> }`. The bare `}` right
@@ -8,29 +8,37 @@
 // reproduce the escape -- so `run` becomes a harmless no-op (nothing is left
 // in its body once the comments end) and everything after runs as ordinary
 // MODULE-SCOPE code in usercode.js: workerd evaluates that unconditionally,
-// before this worker ever calls runner.ts's request handler. That used to be
-// enough to `await import('./guard.js')` and call claimRealFetch() directly,
-// stealing the unrestricted, un-allowlisted fetch before runner.ts's own
-// claim (previously made at runner.ts's own module top level) ever ran --
-// which made THAT claim get null, throw, and crash the whole Actor run
-// (self-DoS; the real exploit payoff for an attacker would be using the
-// stolen fetch directly, not reported here).
+// before this worker ever calls runner.ts's request handler.
+//
+// The first fix attempt (guard.ts's requestHandlingStarted gate) still
+// exported a setter (markRequestHandlingStarted) and getter (claimRealFetch)
+// that escaped code could call directly, since usercode.js shares guard.js's
+// module graph -- any export is equally reachable from both. This probe's
+// payload (below) calls exactly that: `claimRealFetch()`, expecting it back
+// as a callable, unrestricted fetch function.
+//
+// The actual fix (see guard.ts/runner.ts/config.capnp) removes that export
+// surface entirely: this worker's own internal-API access is now a workerd
+// env binding (env.INTERNAL_API), which only ever reaches the genuinely-
+// dispatched fetch(request, env) call -- nothing at module-evaluation time
+// receives a reference to it, exported or otherwise. guard.js now only
+// exports pure allowlist helpers (isAllowedHost, validateUrl, nextRedirectInit,
+// guardedFetch -- see tests/unit/guard.test.ts's "never exports a raw/
+// unrestricted fetch capability" regression test for that invariant directly).
+//
+// So `claimRealFetch` no longer exists on the imported module: this line now
+// throws a plain TypeError ("claimRealFetch is not a function") during module
+// evaluation -- an uncaught exception at that point crashes workerd's own
+// startup, which entrypoint.sh's push_compile_failure() already detects and
+// reports as a normal, SUCCEEDED Actor run with a "Failed to compile: ..."
+// diagnostic item (exitCode 1) -- not a hard Actor run failure, and no
+// capability is exposed either way. See test.sh for how this is asserted.
 //
 // Not valid JS on its own (it opens with an unbalanced `}`) -- intentionally,
 // same shape as the reported PoC. Not TypeScript, not compiled, not
 // typechecked (lives under tests/fixtures/, outside tsconfig's `include` and
 // outside the `tests/*.js` build-artifact glob): see test.sh, which pushes
 // this file's raw content directly as the `code` input.
-//
-// Expected result with the fix (guard.ts's requestHandlingStarted gate):
-// claimRealFetch() called from module scope returns null without consuming
-// the resource, so nothing crashes -- this Actor run completes normally
-// (exitCode 0, "Script completed"), same as any run of an empty script.
-// Before the fix: this run FAILS outright (workerd crashes during module
-// evaluation; entrypoint.sh can't tell that apart from a real infra failure
-// and fails the whole Actor run). test.sh asserts on `apify call`'s own exit
-// status, not a printed sentinel -- this probe's `run` body never executes
-// any of its own code, so it has no captured console to report through.
 //
 // Must be genuine top-level await, not an async IIFE: a module containing
 // top-level await defers the evaluation of modules that depend on it (here,

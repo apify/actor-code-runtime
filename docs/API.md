@@ -152,6 +152,11 @@ dataset via `dataset.listItems`.
 }
 ```
 
+**May return partial results** — if the run is still `RUNNING` when the 60s
+wait (`waitForFinishSecs`) elapses, `items` is read from the dataset at that
+moment and may be empty or a partial subset of the eventual total. Check the
+returned `run.status`; a non-terminal status means `items` is a snapshot, not
+the final result.
 **Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
 then [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get)
 
@@ -163,6 +168,29 @@ const { run, items } = await apify.actor.callAndGetItems({
 });
 console.log(run.status, items.length);
 ```
+
+---
+
+## Execution limits
+
+Three optional Actor input fields bound a script's ability to start child
+Actor runs (`actor.start`/`actor.call`/`actor.callAndGetItems`), independent
+of any single call's own `waitForFinishSecs`/`timeoutSecs`/`maxTotalChargeUsd`
+(which each bound only that one run):
+
+| Field | Type | Description |
+|---|---|---|
+| `maxActorRuns` | `number` | Caps the total number of Actor runs this script may start. Exceeding it throws inside the script. |
+| `maxTotalChargeUsd` | `number` | Execution-level spending budget across every run the script starts — distinct from a single run's own `maxTotalChargeUsd`. Each new run's own cap is clamped down so the sum of all committed per-run caps never exceeds this budget; starting a run once the budget is exhausted throws inside the script. |
+| `defaultTimeoutSecs` | `number` | Used as a child run's `timeoutSecs` when the script's own `actor.start`/`actor.call`/`actor.callAndGetItems` call didn't specify one. |
+
+All three are optional — unset means no limit beyond the Apify API's own defaults.
+
+**`waitForFinishSecs` is not a cost or time limit on the child run.** It only
+bounds how long the API request itself waits before returning (see the
+non-terminal notes on `actor.call` and `run.waitForFinish` above) — the child
+run keeps running, and spending, regardless. `defaultTimeoutSecs` and
+`maxTotalChargeUsd` above are what actually bound a run's duration and cost.
 
 ---
 

@@ -7,33 +7,30 @@
 // Single-tenant: one run = one container = one program = one token. No Worker
 // Loader / per-request isolate is needed — the program runs in this worker,
 // which is itself the sandbox (no filesystem, restricted outbound network).
-// guard.js overrides globalThis.fetch to allow only apify.com, and hands us
-// the real, unrestricted fetch via a one-shot claimRealFetch() for our own
-// (internal) API calls. That claim is gated on markRequestHandlingStarted()
-// (called below, first thing in the `fetch` handler's `/run` path), not on
-// import order — usercode.js's module scope can run attacker-controlled code
-// before this module's own top-level code does, so the claim must not
-// happen at this module's top level either. See guard.ts's comment on
-// claimRealFetch for the full reasoning.
-import { claimRealFetch, markRequestHandlingStarted } from './guard.js';
+// guard.js overrides globalThis.fetch to allow only apify.com.
+//
+// This worker's own (internal) API calls need an unrestricted, un-allowlisted
+// fetch — the internal API is a private IP, not *.apify.com. That capability
+// is bound as `env.INTERNAL_API` (config.capnp), a workerd service binding
+// wired to a separate outbound network, not a shared/exported fetch reference.
+// `env` is only ever handed to the genuinely-dispatched `fetch(request, env)`
+// call below by workerd's own runtime — nothing at module-evaluation time
+// (including attacker-controlled top-level code that escapes usercode.js's
+// wrapper, see entrypoint.sh) ever receives a reference to it, so there is
+// nothing for user code to import or steal. See guard.ts for why an
+// export-based handoff (this worker's previous design) could not be made
+// sound: usercode.js shares guard.js's module graph, so any function guard.js
+// exported was equally callable by escaped user code.
 import { run } from './usercode.js';
 
-// Called as the first, synchronous statement of the `/run` path in the
-// `fetch` handler below — before any `await`, so no attacker-scheduled
-// microtask from usercode.js's module scope can call claimRealFetch() in
-// between. See guard.ts.
-function requireRealFetch(): typeof globalThis.fetch {
-    const fetchFn = claimRealFetch();
-    if (!fetchFn) throw new Error('realFetch already claimed.');
-    return fetchFn;
-}
-// Assigned inside the `fetch` handler's `/run` path (the only call path into
-// the functions below) before any of them run — definite-assignment
-// asserted rather than left `| undefined` so call sites here don't need
-// null checks.
-let realFetch!: typeof globalThis.fetch;
+type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
 
 const DEFAULT_GET_SCHEMA_SAMPLE = 5;
+
+// The Apify API caps a single actor.call/run.waitForFinish wait at 60s
+// (a REST API limit, not this Actor's) — see docs/API.md's Recipes section
+// for the poll-in-a-loop pattern for longer runs.
+const DEFAULT_WAIT_FOR_FINISH_SECS = 60;
 
 // --- Types ---------------------------------------------------------------
 // The Apify API returns many more fields per record than this code reads. Rather
@@ -47,6 +44,7 @@ interface ApifyRecord {
 
 interface RunRecord extends ApifyRecord {
     id: string;
+    status: string;
 }
 
 type SearchParamValue = string | number | boolean | undefined | null;
@@ -179,6 +177,17 @@ interface Env {
     // started it. Platform-injected, not user-settable: unlike an Actor input
     // field, a script running inside this Actor cannot spoof it.
     PARENT_ORIGIN?: string;
+    // Execution-level safeguards on Actor runs a script starts via
+    // actor.start/call/callAndGetItems — see makeApifyBinding's `Limits` and
+    // docs/API.md's "Execution limits" section. All optional; unset means
+    // "no limit beyond the Apify API's own defaults".
+    MAX_ACTOR_RUNS?: string;
+    MAX_TOTAL_CHARGE_USD?: string;
+    DEFAULT_TIMEOUT_SECS?: string;
+    // Unrestricted (non-allowlisted) fetch for this worker's own calls to the
+    // platform-internal Apify API. Bound to a separate outbound network
+    // service in config.capnp — see this file's header comment and guard.ts.
+    INTERNAL_API: Fetcher;
 }
 
 interface OutputItem {
@@ -247,7 +256,18 @@ function makePaginatedList<T, Page extends ItemsPage<T>>(
 const MCP_ORIGIN = 'MCP';
 const REQUEST_ORIGIN_HEADER = 'X-Apify-Request-Origin';
 
-function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | undefined) {
+// Execution-level safeguards on Actor runs a script starts (actor.start/call/
+// callAndGetItems, which all funnel through createRun() below). Independent of
+// any single run's own timeoutSecs/waitForFinishSecs/maxTotalChargeUsd, which
+// only bound THAT run — nothing previously bounded how many runs one script
+// could start, or their combined cost. See docs/API.md's "Execution limits".
+interface Limits {
+    maxActorRuns?: number;
+    maxTotalChargeUsd?: number;
+    defaultTimeoutSecs?: number;
+}
+
+function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | undefined, internalFetch: Fetcher['fetch'], limits: Limits) {
     // Every request this Actor makes identifies itself; requests made while THIS
     // run's own origin is MCP additionally forward that origin so runs started by
     // apify.actor.start/call/callAndGetItems() below get meta.origin: 'MCP' too,
@@ -290,7 +310,7 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
                 headers['content-type'] = contentType ?? 'application/json';
             }
         }
-        const response = await realFetch(buildUrl(path, searchParams), { method, headers, body: requestBody });
+        const response = await internalFetch(buildUrl(path, searchParams), { method, headers, body: requestBody });
         if (!response.ok) throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
         return response;
     };
@@ -306,29 +326,54 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
     // Run IDs this script itself started, via actor.call() / actor.start() (and transitively
     // actor.callAndGetItems(), which shares createRun() below). run.abort() below is scoped to
     // this set — a script can only abort runs it started, not any account-wide runId it's
-    // handed or guesses.
+    // handed or guesses. Also used by abortTrackedRuns() (called from the top-level exception
+    // handler below) to clean up runs still going when the script itself crashed.
     const startedRunIds = new Set<string>();
+    const TERMINAL_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'ABORTING', 'TIMED-OUT']);
+    const nonTerminalRunIds = new Set<string>();
 
-    // POST /acts/:id/runs, shared by actor.call() (start+wait, waitForFinishSecs defaults to 60,
-    // capped at 60s per the Apify API — for longer runs use start() + apify.run.waitForFinish())
-    // and actor.start() (async kickoff, no wait). Returns the run record so the caller can read
-    // defaultDatasetId / defaultKeyValueStoreId. Intentionally does NOT use /run-sync, which
-    // returns the OUTPUT KVS record (a pattern only some Actors follow) rather than the
-    // structured run record.
-    const createRun = ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }: StartOptions): Promise<RunRecord> =>
-        apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
+    // Conservative execution-level cost cap: each run's OWN maxTotalChargeUsd is a ceiling,
+    // not a bill, so this tracks committed ceilings (not realized spend) against
+    // limits.maxTotalChargeUsd and never lets a script authorize more combined ceiling than
+    // that budget, even though actual spend will usually be lower.
+    let committedChargeUsd = 0;
+
+    // POST /acts/:id/runs, shared by actor.call() (start+wait, waitForFinishSecs defaults to
+    // DEFAULT_WAIT_FOR_FINISH_SECS, capped at 60s per the Apify API — for longer runs use
+    // start() + apify.run.waitForFinish()) and actor.start() (async kickoff, no wait). Returns
+    // the run record so the caller can read defaultDatasetId / defaultKeyValueStoreId.
+    // Intentionally does NOT use /run-sync, which returns the OUTPUT KVS record (a pattern
+    // only some Actors follow) rather than the structured run record.
+    const createRun = ({ actorId, input, memoryMbytes, timeoutSecs, waitForFinishSecs, maxTotalChargeUsd, maxItems }: StartOptions): Promise<RunRecord> => {
+        if (limits.maxActorRuns !== undefined && startedRunIds.size >= limits.maxActorRuns) {
+            throw new Error(`Blocked actor run: this script already started ${startedRunIds.size} Actor run(s), the configured limit is ${limits.maxActorRuns}`);
+        }
+        let effectiveMaxCharge = maxTotalChargeUsd;
+        if (limits.maxTotalChargeUsd !== undefined) {
+            const remaining = limits.maxTotalChargeUsd - committedChargeUsd;
+            if (remaining <= 0) {
+                throw new Error(`Blocked actor run: execution spending budget of $${limits.maxTotalChargeUsd} is exhausted`);
+            }
+            // A run without its own cap could spend the whole remaining budget; a run with
+            // its own cap higher than what's left gets clamped down to what's left.
+            effectiveMaxCharge = effectiveMaxCharge === undefined ? remaining : Math.min(effectiveMaxCharge, remaining);
+        }
+        return apiData('POST', `/acts/${encodeURIComponent(actorId)}/runs`, {
             searchParams: {
                 waitForFinish: waitForFinishSecs,
                 memory: memoryMbytes,
-                timeout: timeoutSecs,
-                maxTotalChargeUsd,
+                timeout: timeoutSecs ?? limits.defaultTimeoutSecs,
+                maxTotalChargeUsd: effectiveMaxCharge,
                 maxItems,
             },
             body: input ?? {},
         }).then((runRecord: RunRecord) => {
             startedRunIds.add(runRecord.id);
+            if (!TERMINAL_STATUSES.has(runRecord.status)) nonTerminalRunIds.add(runRecord.id);
+            if (effectiveMaxCharge !== undefined) committedChargeUsd += effectiveMaxCharge;
             return runRecord;
         });
+    };
 
     const actor = {
         get: ({ actorId }: ActorIdOptions): Promise<ApifyRecord> =>
@@ -337,16 +382,21 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
         // Shared by run() and start(): both POST /acts/:id/runs, differing only in whether
         // waitForFinish is set. Records the created run's ID in startedRunIds so run.abort()
         // can be scoped to runs this script itself started (see the run.abort definition below).
-        call: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: 60, ...opts }),
+        call: (opts: StartOptions): Promise<RunRecord> => createRun({ waitForFinishSecs: DEFAULT_WAIT_FOR_FINISH_SECS, ...opts }),
 
         // Async kickoff. Returns immediately with a run record in READY/RUNNING state.
         start: (opts: StartOptions): Promise<RunRecord> => createRun(opts),
 
-        // Runs an Actor (same as call(), waitForFinishSecs defaults to 60) and returns its
-        // dataset items in one call. Calls createRun() directly rather than through
-        // `actor.call()` — same underlying request, no self-reference to `actor` needed.
+        // Runs an Actor (same as call(), waitForFinishSecs defaults to DEFAULT_WAIT_FOR_FINISH_SECS)
+        // and returns its dataset items in one call. Calls createRun() directly rather than
+        // through `actor.call()` — same underlying request, no self-reference to `actor` needed.
+        //
+        // If the run is still RUNNING when the wait elapses, this reads whatever the dataset
+        // holds at that moment — items may be empty or a partial subset of the eventual total.
+        // Check `run.status` (returned alongside `items`); a non-terminal status means the
+        // items are a snapshot, not the final result — see docs/API.md.
         callAndGetItems: async ({ actorId, input, fields, limit, ...runOpts }: RunAndGetItemsOptions): Promise<{ run: RunRecord; items: ApifyRecord[] }> => {
-            const runRecord = await createRun({ actorId, input, waitForFinishSecs: 60, ...runOpts });
+            const runRecord = await createRun({ actorId, input, waitForFinishSecs: DEFAULT_WAIT_FOR_FINISH_SECS, ...runOpts });
             const { items } = await dataset.listItems({
                 datasetId: runRecord.defaultDatasetId as string, fields, limit,
             });
@@ -360,10 +410,13 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
 
         // Block until the run terminates or `waitForFinishSecs` elapses (whichever comes first).
         // The Apify API caps this at 60s per request; longer waits require a polling loop.
-        waitForFinish: ({ runId, waitForFinishSecs = 60 }: WaitOptions): Promise<RunRecord> =>
-            apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
+        waitForFinish: async ({ runId, waitForFinishSecs = DEFAULT_WAIT_FOR_FINISH_SECS }: WaitOptions): Promise<RunRecord> => {
+            const runRecord: RunRecord = await apiData('GET', `/actor-runs/${encodeURIComponent(runId)}`, {
                 searchParams: { waitForFinish: waitForFinishSecs },
-            }),
+            });
+            if (TERMINAL_STATUSES.has(runRecord.status)) nonTerminalRunIds.delete(runId);
+            return runRecord;
+        },
 
         // Scoped to runs this script itself started (see startedRunIds above) — without this,
         // any runId a script is handed (e.g. read from a dataset item, or guessed) could abort
@@ -372,6 +425,7 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
             if (!startedRunIds.has(runId)) {
                 throw new Error(`Blocked run.abort: "${runId}" was not started by this script`);
             }
+            nonTerminalRunIds.delete(runId);
             return apiData('POST', `/actor-runs/${encodeURIComponent(runId)}/abort`);
         },
 
@@ -455,7 +509,7 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
         // Returns null when the key does not exist (404), not an error — this matches the common
         // "lookup or default" pattern in code.
         get: async ({ storeId, key }: KeyValueStoreGetOptions): Promise<unknown> => {
-            const response = await realFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
+            const response = await internalFetch(buildUrl(`/key-value-stores/${encodeURIComponent(storeId)}/records/${encodeURIComponent(key)}`), {
                 headers: baseHeaders,
             });
             if (response.status === 404) return null;
@@ -511,32 +565,57 @@ function makeApifyBinding(token: string, apiV2: string, parentOrigin: string | u
         return makePaginatedList(fetchPage, offset, limit);
     };
 
+    // Best-effort cleanup for runs this script started but left non-terminal (e.g. the
+    // script itself threw with a run still in progress). Not part of the frozen `apify`
+    // binding handed to user code — called directly by the top-level exception handler
+    // below. One bad abort must not stop the others (the run tracking loop's whole point is
+    // to catch stragglers after an error): a run that already finished on the platform
+    // between our last check and now is an *expected* abort failure (the API rejects
+    // aborting a finished run), not a bug, so failures are reported back for logging, never
+    // thrown.
+    const abortTrackedRuns = async (): Promise<{ runId: string; error: string }[]> => {
+        const runIds = [...nonTerminalRunIds];
+        const results = await Promise.allSettled(runIds.map((runId) => run.abort({ runId })));
+        return results.flatMap((result, i) => result.status === 'rejected' ? [{ runId: runIds[i], error: errorMessage(result.reason) }] : []);
+    };
+
     // Freeze every namespace (and the wrapper) so the script can't reassign a method to
     // corrupt its own behavior or, for `console` below, its own output capture.
-    return Object.freeze({
+    const binding = Object.freeze({
         actor: Object.freeze(actor),
         store,
         run: Object.freeze(run),
         dataset: Object.freeze(dataset),
         keyValueStore: Object.freeze(keyValueStore),
     });
+    return { binding, abortTrackedRuns };
 }
 
 // The shape handed to user code as the `apify` binding. Exported (type-only —
 // erased at compile time) so tests/*.ts can type-check probes against the same
 // surface real usercode.js runs against, without importing runner.ts at runtime.
-export type ApifyBinding = ReturnType<typeof makeApifyBinding>;
+export type ApifyBinding = ReturnType<typeof makeApifyBinding>['binding'];
 
 // Push the captured streams as a single item to the run's default dataset.
-async function pushOutput(apiV2: string, token: string, env: Env, item: OutputItem): Promise<void> {
+async function pushOutput(apiV2: string, token: string, internalFetch: Fetcher['fetch'], env: Env, item: OutputItem): Promise<void> {
     const datasetId = env.DEFAULT_DATASET_ID || env.DEFAULT_DATASET_ID_LEGACY;
     if (!datasetId) throw new Error('Default dataset ID missing from Actor run environment.');
-    const response = await realFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
+    const response = await internalFetch(`${apiV2}/datasets/${encodeURIComponent(datasetId)}/items`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify(item),
     });
     if (!response.ok) throw new Error(`Failed to push dataset item: ${response.status} ${await response.text()}`);
+}
+
+// Parses an optional positive-number env var (as set by entrypoint.sh from Actor input).
+// Absent, blank, non-numeric, or non-positive all mean "no limit configured" — this is a
+// human-edited-adjacent path (Actor input -> env var), not a write-time-validated one, so a
+// malformed value fails open to "no limit" rather than crashing the run.
+function parsePositiveNumberEnv(value: string | undefined): number | undefined {
+    if (!value) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 export default {
@@ -545,15 +624,17 @@ export default {
         if (url.pathname === '/health') return new Response('ok');
         if (url.pathname !== '/run') return new Response('Not found', { status: 404 });
 
-        // First, synchronous statements of the /run path — see guard.ts and the
-        // requireRealFetch comment above for why this can't happen any earlier.
-        markRequestHandlingStarted();
-        realFetch = requireRealFetch();
-
         const token = env.APIFY_TOKEN;
         if (!token) throw new Error('APIFY_TOKEN missing from Actor run environment.');
         // APIFY_API_BASE_URL is the platform-internal API (may have a trailing slash).
         const apiV2 = `${(env.API_BASE_URL || 'https://api.apify.com').replace(/\/+$/, '')}/v2`;
+        const internalFetch: Fetcher['fetch'] = (input, init) => env.INTERNAL_API.fetch(input, init);
+
+        const limits: Limits = {
+            maxActorRuns: parsePositiveNumberEnv(env.MAX_ACTOR_RUNS),
+            maxTotalChargeUsd: parsePositiveNumberEnv(env.MAX_TOTAL_CHARGE_USD),
+            defaultTimeoutSecs: parsePositiveNumberEnv(env.DEFAULT_TIMEOUT_SECS),
+        };
 
         const stdout: string[] = [];
         const stderr: string[] = [];
@@ -564,6 +645,8 @@ export default {
             warn:  (...args: unknown[]) => stderr.push(args.map(stringify).join(' ')),
             info:  (...args: unknown[]) => stdout.push(args.map(stringify).join(' ')),
         });
+
+        const { binding, abortTrackedRuns } = makeApifyBinding(token, apiV2, env.PARENT_ORIGIN, internalFetch, limits);
 
         // A thrown program is a user-level failure: capture it in stderr and still
         // push the output, so the run SUCCEEDS with diagnostics. Infra failures
@@ -580,14 +663,21 @@ export default {
         let exitCode = 0;
         let statusMessage = 'Script completed';
         try {
-            await run(makeApifyBinding(token, apiV2, env.PARENT_ORIGIN), captureConsole);
+            await run(binding, captureConsole);
         } catch (err) {
             stderr.push(errorDetail(err));
             exitCode = 1;
             statusMessage = `Script threw: ${errorMessage(err)}`;
+            // Best-effort: a script that started Actor runs and then crashed shouldn't leave
+            // them running unattended. Failures here don't change exitCode/statusMessage —
+            // the script's own failure is the primary signal; cleanup is secondary.
+            const abortFailures = await abortTrackedRuns();
+            for (const { runId, error } of abortFailures) {
+                stderr.push(`Cleanup: failed to abort run ${runId}: ${error}`);
+            }
         }
 
-        await pushOutput(apiV2, token, env, {
+        await pushOutput(apiV2, token, internalFetch, env, {
             stdout: stdout.join('\n'),
             stderr: stderr.join('\n'),
             exitCode,

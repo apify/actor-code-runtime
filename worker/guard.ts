@@ -1,9 +1,6 @@
 // Restrict the user program's outbound network to apify.com and its subdomains.
 // Imported before usercode.js so the overrides are in place even for code that
-// runs at module-evaluation time. Our own Apify API calls use the real,
-// unrestricted fetch (the internal API is a private IP, not *.apify.com) —
-// see claimRealFetch() below for how runner.js gets it without leaving it
-// usable by user code.
+// runs at module-evaluation time.
 //
 // Egress surface (workerd, no nodejs_compat): the only JS-reachable outbound
 // primitives are fetch, WebSocket, and EventSource. Raw sockets (node:net,
@@ -12,54 +9,32 @@
 // because runner.js and the apify binding never use them — leaving them would
 // be a non-fetch egress path around the allowlist (apify/ai-team#216 finding A,
 // via WebSocket). If a future need arises, wrap them like fetch instead.
-
+//
+// This module used to also hand runner.js an unrestricted "real fetch" for its
+// own internal API calls, via a pair of exports (markRequestHandlingStarted /
+// claimRealFetch). That capability-through-export design was broken: anything
+// in usercode.js's module scope can `import('./guard.js')` too (ES modules
+// have no notion of a "trusted" importer), so user code could call the same
+// exports runner.js did and steal the unrestricted fetch before runner.js's
+// own claim ran (PR #1 review, 2026-07-21 and again 2026-08-01 — the second
+// round found the first fix's gate was itself still an exported, callable
+// setter). Any function this module exports is equally reachable from
+// usercode.js, so no export-based gate can be made sound.
+//
+// The actual fix moves runner.js's internal API access off of a module export
+// entirely and onto workerd's own env binding (`INTERNAL_API` in
+// config.capnp, wired to a separate outbound network service — see there).
+// `env` is a parameter workerd hands only to the genuinely-dispatched
+// `fetch(request, env)` call; nothing at module-evaluation time (including an
+// escaped top-level statement in usercode.js) ever receives a reference to
+// it, so there is nothing here for user code to import or steal. This module
+// no longer needs to capture or export a privileged fetch at all.
 const realFetch = globalThis.fetch.bind(globalThis);
-
-// One-shot handoff of the unrestricted fetch to runner.js — gated on genuine
-// request handling, not on import order between guard.js and usercode.js.
-//
-// entrypoint.sh splices the `code` input verbatim (no escaping) into
-// `export async function run(apify, console) { <code> }`. A bare `}` in
-// `code` closes that function early; everything after it runs as ordinary
-// MODULE-SCOPE code in usercode.js, executed during module evaluation —
-// i.e. unconditionally, before workerd ever calls this worker's own
-// `fetch(request, env)` handler. That escaped code can `await
-// import('./guard.js')` and call claimRealFetch() itself.
-//
-// This module previously assumed import order made runner.js's own claim run
-// first (guard.js has no dependency on usercode.js, so it evaluates before
-// it) — that protects nothing here, because it's usercode.js's top-level code
-// racing runner.ts's top-level code, and usercode.js is the import evaluated
-// immediately before runner.ts's own body runs. Verified live (PR #1 review,
-// 2026-07-21): a `code` input using the escape above reliably wins that race,
-// so runner.ts's own claim got null and threw, crashing the whole Actor run.
-//
-// The actual invariant that holds regardless of any module-graph ordering:
-// usercode.js's module scope never runs *inside* a `fetch(request, env)`
-// call — module evaluation always finishes before workerd dispatches the
-// first request. So claimRealFetch() refuses to hand anything out until
-// markRequestHandlingStarted() has been called; runner.ts calls it (and
-// claims) as the first, synchronous statement of its `/run` handling, before
-// any `await`, so no attacker-scheduled microtask can race it either. A claim
-// attempted before that (legitimate or injected) gets null without consuming
-// the resource, so the real claim still succeeds afterward.
-let requestHandlingStarted = false;
-export function markRequestHandlingStarted(): void {
-    requestHandlingStarted = true;
-}
-
-let unclaimedRealFetch: typeof realFetch | null = realFetch;
-export function claimRealFetch(): typeof realFetch | null {
-    if (!requestHandlingStarted) return null; // too early to be a trusted caller
-    const fetchFn = unclaimedRealFetch;
-    unclaimedRealFetch = null;
-    return fetchFn;
-}
 
 // Match apify.com exactly or any subdomain. The leading dot in the suffix is
 // what rejects look-alikes: `evilapify.com` (no dot) and `apify.com.evil.com`
 // (ends with `.evil.com`) both fail.
-function isAllowedHost(hostname: string): boolean {
+export function isAllowedHost(hostname: string): boolean {
     const host = hostname.toLowerCase().replace(/\.$/, ''); // strip FQDN trailing dot
     return host === 'apify.com' || host.endsWith('.apify.com');
 }
@@ -73,7 +48,7 @@ function requestUrl(input: RequestInfo | URL): string {
 
 // Parses and validates one URL against the allowlist. Returns the parsed URL
 // (callers use it to resolve a relative redirect Location) or throws.
-function validateUrl(input: RequestInfo | URL): URL {
+export function validateUrl(input: RequestInfo | URL): URL {
     let url: URL;
     try {
         // Parse to the real host — defeats userinfo (`apify.com@evil.com`),
@@ -100,14 +75,14 @@ function validateUrl(input: RequestInfo | URL): URL {
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECT_HOPS = 5;
 
-function nextRedirectInit(init: RequestInit | undefined, status: number): RequestInit | undefined {
+export function nextRedirectInit(init: RequestInit | undefined, status: number): RequestInit | undefined {
     const method = (init?.method ?? 'GET').toUpperCase();
     const downgradeToGet = status === 303 || ((status === 301 || status === 302) && method === 'POST');
     if (!downgradeToGet) return init;
     return { ...init, method: 'GET', body: undefined };
 }
 
-async function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined, hop = 0): Promise<Response> {
+export async function guardedFetch(input: RequestInfo | URL, init: RequestInit | undefined, hop = 0): Promise<Response> {
     if (hop > MAX_REDIRECT_HOPS) {
         throw new Error(`Blocked fetch: exceeded ${MAX_REDIRECT_HOPS} redirects`);
     }

@@ -21,6 +21,24 @@
                 "type": "string",
                 "description": "JavaScript executed in the sandbox with `apify` and `console` globals; only console output is captured and pushed to the dataset as { stdout, stderr, exitCode, statusMessage } — a top-level `return` value is NOT captured. Before writing code that calls a specific Actor, check its real input field names first — via fetch-actor-details (outside this script, before you write it) or apify.actor.get({ actorId }) (inside it, for an Actor picked at runtime). Do not guess field names from memory; a wrong one throws a fast 400, but costs a wasted round trip. Print a small JSON summary of the result — never dump full datasets. Write top-level `await` statements directly in the script; do NOT wrap your logic in an async function you call without awaiting (e.g. `async function main(){...}; main()`) — the script returns as soon as the top-level body finishes, silently discarding anything still pending, with no error. Every apify.* method takes ONE options object keyed by id, e.g. apify.actor.call({ actorId, input }), apify.dataset.listItems({ datasetId, limit }) — this is NOT the public apify-client SDK's curried apify.actor(id).call(input) shape. If a prior attempt already logged a nested run's defaultDatasetId/defaultKeyValueStoreId (visible in your own earlier turns), reuse it — do NOT re-run the same Actor call with identical input, that wastes compute on a call that already succeeded. apify.actor.call/run.waitForFinish may return non-terminal (READY/RUNNING) once the 60s wait cap elapses — that is NOT a failure, poll again instead of throwing.",
                 "editor": "javascript"
+            },
+            "maxActorRuns": {
+                "title": "Max Actor runs",
+                "type": "integer",
+                "description": "Caps how many Actor runs this script may start in total across actor.start/actor.call/actor.callAndGetItems. Starting one more once the limit is reached throws inside the script. Omit for no limit.",
+                "minimum": 1
+            },
+            "maxTotalChargeUsd": {
+                "title": "Max total charge (USD)",
+                "type": "number",
+                "description": "Execution-wide spending budget across every Actor run this script starts — distinct from a single call's own maxTotalChargeUsd, which only caps that one run. Each run's own cap is clamped so the combined total never exceeds this budget; starting a run once it's exhausted throws inside the script. Omit for no limit.",
+                "minimum": 0
+            },
+            "defaultTimeoutSecs": {
+                "title": "Default Actor run timeout (secs)",
+                "type": "integer",
+                "description": "Applied as timeoutSecs to actor.start/actor.call/actor.callAndGetItems calls that don't specify their own. Omit to use the Apify API's own default.",
+                "minimum": 1
             }
         },
         "required": ["code"]

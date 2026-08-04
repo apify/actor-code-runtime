@@ -57,6 +57,9 @@ override per call for scripts chaining several long Actor runs (MCP
   re-run an identical call, it wastes cost.
 - Print a small JSON summary, never a full dataset — only `console.log`/
   `console.info` output comes back; a top-level `return` is **not** captured.
+- `callAndGetItems` reads the dataset once, right after its (max 60s) wait —
+  if the child run is still `RUNNING` at that point, `items` may be empty or
+  partial. Check the returned `run.status` before treating it as final.
 
 ## Input
 
@@ -69,6 +72,9 @@ override per call for scripts chaining several long Actor runs (MCP
 | Field | Type | Description |
 |---|---|---|
 | `code` | string | The JavaScript script to run (JS only, not transpiled). It receives the `apify` binding and `console`. |
+| `maxActorRuns` | number | *Optional.* Caps how many Actor runs the script may start in total; exceeding it throws inside the script. |
+| `maxTotalChargeUsd` | number | *Optional.* Execution-level spending budget across all runs the script starts (distinct from a single run's own `maxTotalChargeUsd`); exhausting it throws inside the script. |
+| `defaultTimeoutSecs` | number | *Optional.* Default `timeoutSecs` for child runs that don't set their own. |
 
 ## Output
 
@@ -187,7 +193,7 @@ apify.store({ search, limit?, offset?, category? })  // → { items, count, offs
 apify.actor.get({ actorId })                                  // → actor
 apify.actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })  // → run
 apify.actor.call({ actorId, ...startOpts, waitForFinishSecs = 60 })           // → run (may be non-terminal READY/RUNNING past the 60s cap — not an error, see Recipes)
-apify.actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items }
+apify.actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })  // → { run, items } (items may be partial if run is still RUNNING — check run.status)
 
 // Runs
 apify.run.get({ runId })                                    // → run
