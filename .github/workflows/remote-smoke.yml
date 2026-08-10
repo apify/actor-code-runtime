@@ -1,0 +1,41 @@
+name: Remote smoke tests
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remote-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  remote-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Apify CLI
+        uses: apify/setup-apify-cli-action@8b19e6a52312e8948b3b10cdb06bd3fa39e8db4a
+        with:
+          token: ${{ secrets.APIFY_TOKEN }}
+
+      - name: Run remote smoke tests
+        run: ./test.sh

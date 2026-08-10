@@ -1,0 +1,459 @@
+# The `apify` binding — API reference
+
+Inside a Code Mode script a global **`apify`** object exposes a small, typed
+subset of the Apify API, authenticated with the current run's token. This
+document describes every method in detail.
+
+## Conventions
+
+- **Every method is `async`** — except `dataset.listItems`/`store` (see
+  below), which are plain functions that return an already-awaitable value;
+  `await`ing one behaves identically to awaiting a true `async` call.
+- **One options object.** Each method takes a single object argument; there are
+  no positional parameters.
+- **Paginated methods are dual-mode.** [`dataset.listItems`](#datasetlistitems--object-count-offset-limit-desc-)
+  and [`store`](#apifystore--object-count-offset-limit-) return a value that's
+  both a `Promise` and an `AsyncIterable`: `await` it for one page (`{ items,
+  count, offset, limit, ... }`); `for await (const item of ...)` it to
+  auto-paginate through everything, one item at a time. One call, one name,
+  two ways to consume it — matching the official
+  [`apify-client`](https://github.com/apify/apify-client-js) SDK's
+  `PaginatedIterator` convention. There's no separate "iterate" method.
+- **`actorId`** accepts either `username/name` (e.g. `apify/rag-web-browser`) or
+  the Actor's ID.
+- **Return values.** The Apify API wraps most responses in a `{ "data": … }`
+  envelope. These methods **unwrap it for you** and return the inner value; the
+  linked API page describes that inner `data` shape. Where a method transforms
+  the response further (extracts an array, parses by content type, infers a
+  schema, returns plain text), the exact output is spelled out below.
+- **`Apify API:`** each method links to its underlying endpoint on
+  [docs.apify.com/api/v2](https://docs.apify.com/api/v2) so you can inspect the
+  live request/response schema.
+- **Errors.** A non-2xx API response throws an `Error` whose message is
+  `<METHOD> <path> failed: <status> <body>`. The one exception is
+  [`keyValueStore.get`](#keyvaluestoreget--value--null), which returns `null` for a missing key.
+- **Network.** Outbound `fetch` from your script is restricted to `apify.com`
+  and its subdomains.
+- **Reuse, don't re-run.** If a prior attempt already logged a nested run's
+  `defaultDatasetId`/`defaultKeyValueStoreId` (visible in your own earlier
+  turns), reuse it — do not re-run the same Actor call with identical input.
+  Re-running wastes the compute/cost of a call that already succeeded.
+
+---
+
+## `apify.store`
+
+Apify's own API tags this endpoint `Store` — a top-level resource, not an
+Actor method — so the binding mirrors that: `apify.store(...)`, not
+`apify.actor.store(...)`.
+
+### `apify.store({ search, limit?, offset?, category? })` → `{ items, count, offset, limit }`
+
+Search the Apify Store. Dual-mode — see [Conventions](#conventions).
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `search` | `string` | yes | Full-text search query. |
+| `limit` | `number` | no | Page size (`await` mode) / items per page (`for await` mode). |
+| `offset` | `number` | no | Starting offset. |
+| `category` | `string` | no | Restrict to a Store category. |
+
+**Output (custom):** one page — `{ items: Actor[], count, offset, limit }`
+(`count` is this page's actual item count; `offset`/`limit` echo the request).
+**Apify API:** [`GET /v2/store`](https://docs.apify.com/api/v2/store-get)
+
+```js
+// One page
+const { items } = await apify.store({ search: 'web scraper', limit: 5 });
+console.log(items.map((a) => `${a.username}/${a.name}`).join('\n'));
+
+// Every match
+const names = [];
+for await (const actor of apify.store({ search: 'web scraper', limit: 20 })) {
+    names.push(`${actor.username}/${actor.name}`);
+}
+```
+
+---
+
+## `apify.actor`
+
+### `actor.get({ actorId })` → `Actor`
+
+Fetch the full record for one Actor.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `actorId` | `string` | yes | `username/name` or Actor ID. |
+
+**Output:** the Actor object (unwrapped `data`).
+**Apify API:** [`GET /v2/acts/{actorId}`](https://docs.apify.com/api/v2/act-get)
+
+### `actor.start({ actorId, input?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })` → `Run`
+
+Start an Actor **asynchronously** and return immediately with a run record in
+`READY`/`RUNNING` state. Use [`run.waitForFinish`](#runwaitforfinish--run) to block for the result.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `actorId` | `string` | yes | `username/name` or Actor ID. |
+| `input` | `object` | no | Actor input (defaults to `{}`). |
+| `memoryMbytes` | `number` | no | Memory limit for the run (`memory` query param). |
+| `timeoutSecs` | `number` | no | Run timeout in seconds (`timeout`). |
+| `maxTotalChargeUsd` | `number` | no | Hard cap on the run's cost. |
+| `maxItems` | `number` | no | Max dataset items for pay-per-result Actors. |
+
+**Output:** the Run object (unwrapped `data`).
+**Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
+
+### `actor.call({ actorId, input?, waitForFinishSecs?, memoryMbytes?, timeoutSecs?, maxTotalChargeUsd?, maxItems? })` → `Run`
+
+Start an Actor and **wait** for it to finish (or until `waitForFinishSecs`
+elapses), then return the run record.
+
+| Param | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `actorId` | `string` | yes | | `username/name` or Actor ID. |
+| `input` | `object` | no | `{}` | Actor input. |
+| `waitForFinishSecs` | `number` | no | `60` | Seconds to wait (`waitForFinish`). **The Apify API caps a single wait at 60s** — for longer runs use `start()` + a `run.waitForFinish()` loop. |
+| `memoryMbytes` | `number` | no | | Memory limit. |
+| `timeoutSecs` | `number` | no | | Run timeout. |
+| `maxTotalChargeUsd` | `number` | no | | Cost cap. |
+| `maxItems` | `number` | no | | Max items (pay-per-result). |
+
+**Output:** the Run object (unwrapped `data`), exposing `defaultDatasetId` and
+`defaultKeyValueStoreId` for reading results. Uses the standard run endpoint
+(not `/run-sync`, which returns the output record instead of the run object).
+**May return non-terminal** (`status: 'READY'`/`'RUNNING'`) if `waitForFinishSecs`
+(capped at 60s by the API) elapses before the run finishes — this is **not**
+an error; poll [`run.waitForFinish`](#runwaitforfinish--run) until `status` is
+terminal (`SUCCEEDED`/`FAILED`/`ABORTED`/`TIMED-OUT`).
+**Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
+
+### `actor.callAndGetItems({ actorId, input?, fields?, limit?, ...runOpts })` → `{ run, items }`
+
+Convenience wrapper: `actor.call(...)` followed by reading the run's default
+dataset via `dataset.listItems`.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `actorId` | `string` | yes | `username/name` or Actor ID. |
+| `input` | `object` | no | Actor input. |
+| `fields` | `string[]` | no | Restrict returned item fields. |
+| `limit` | `number` | no | Max items to fetch. |
+| `...runOpts` | | no | Any `actor.call` option (`waitForFinishSecs`, `memoryMbytes`, `timeoutSecs`, `maxTotalChargeUsd`, `maxItems`). |
+
+**Output (custom):**
+
+```js
+{
+  run: Run,        // the run object, as actor.call returns
+  items: object[]  // items from run.defaultDatasetId
+}
+```
+
+**May return partial results** — if the run is still `RUNNING` when the 60s
+wait (`waitForFinishSecs`) elapses, `items` is read from the dataset at that
+moment and may be empty or a partial subset of the eventual total. Check the
+returned `run.status`; a non-terminal status means `items` is a snapshot, not
+the final result.
+**Apify API:** [`POST /v2/acts/{actorId}/runs`](https://docs.apify.com/api/v2/act-runs-post)
+then [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get)
+
+```js
+const { run, items } = await apify.actor.callAndGetItems({
+    actorId: 'apify/rag-web-browser',
+    input: { query: 'apify' },
+    limit: 3,
+});
+console.log(run.status, items.length);
+```
+
+---
+
+## Execution limits
+
+Three optional Actor input fields bound a script's ability to start child
+Actor runs (`actor.start`/`actor.call`/`actor.callAndGetItems`), independent
+of any single call's own `waitForFinishSecs`/`timeoutSecs`/`maxTotalChargeUsd`
+(which each bound only that one run):
+
+| Field | Type | Description |
+|---|---|---|
+| `maxActorRuns` | `number` | Caps the total number of Actor runs this script may start. Exceeding it throws inside the script. |
+| `maxTotalChargeUsd` | `number` | Execution-level spending budget across every run the script starts — distinct from a single run's own `maxTotalChargeUsd`. Each new run's own cap is clamped down so the sum of all committed per-run caps never exceeds this budget; starting a run once the budget is exhausted throws inside the script. |
+| `defaultTimeoutSecs` | `number` | Used as a child run's `timeoutSecs` when the script's own `actor.start`/`actor.call`/`actor.callAndGetItems` call didn't specify one. |
+
+All three are optional — unset means no limit beyond the Apify API's own defaults.
+
+**`waitForFinishSecs` is not a cost or time limit on the child run.** It only
+bounds how long the API request itself waits before returning (see the
+non-terminal notes on `actor.call` and `run.waitForFinish` above) — the child
+run keeps running, and spending, regardless. `defaultTimeoutSecs` and
+`maxTotalChargeUsd` above are what actually bound a run's duration and cost.
+
+---
+
+## `apify.run`
+
+### `run.get({ runId })` → `Run`
+
+Fetch the current run record (status, stats, default storage IDs).
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `runId` | `string` | yes | The run ID. |
+
+**Output:** the Run object (unwrapped `data`).
+**Apify API:** [`GET /v2/actor-runs/{runId}`](https://docs.apify.com/api/v2/actor-run-get)
+
+### `run.waitForFinish({ runId, waitForFinishSecs? })` → `Run`
+
+Block until the run terminates or `waitForFinishSecs` elapses, whichever comes
+first, then return the run record.
+
+| Param | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `runId` | `string` | yes | | The run ID. |
+| `waitForFinishSecs` | `number` | no | `60` | Seconds to wait (`waitForFinish`). **Capped at 60s by the API**; poll in a loop for longer runs. |
+
+**Output:** the Run object (unwrapped `data`). **May return non-terminal**
+(`status: 'READY'`/`'RUNNING'`) if the cap elapses first — this is **not** an
+error, it means keep polling; check `status` against the terminal set
+(`SUCCEEDED`/`FAILED`/`ABORTED`/`TIMED-OUT`) before treating any other value
+as a failure.
+**Apify API:** [`GET /v2/actor-runs/{runId}`](https://docs.apify.com/api/v2/actor-run-get)
+
+### `run.abort({ runId })` → `Run`
+
+Abort a running run. Returns the run record (status transitions to `ABORTING`).
+Aborting a finished run is an API error.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `runId` | `string` | yes | The run ID. |
+
+**Output:** the Run object (unwrapped `data`).
+**Apify API:** [`POST /v2/actor-runs/{runId}/abort`](https://docs.apify.com/api/v2/act-run-abort-post)
+
+### `run.getLog({ runId, limit? })` → `string`
+
+Return the run's log as text.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `runId` | `string` | yes | The run ID. |
+| `limit` | `number` | no | If set, return only the **last** `limit` characters (client-side tail; the full log is fetched). |
+
+**Output (custom):** the raw log **text** (not JSON). With `limit`, the last
+`limit` characters.
+**Apify API:** [`GET /v2/logs/{runId}`](https://docs.apify.com/api/v2/log-get)
+
+---
+
+## `apify.dataset`
+
+### `dataset.create({ name? })` → `Dataset`
+
+Create a dataset and return its record (use `.id` for subsequent calls).
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `name` | `string` | no | Named (persistent) dataset; omit for an unnamed (temporary) one. |
+
+**Output:** the Dataset object (unwrapped `data`).
+**Apify API:** [`POST /v2/datasets`](https://docs.apify.com/api/v2/datasets-post)
+
+### `dataset.pushItems({ datasetId, items })` → `void`
+
+Append one or more items to a dataset.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `datasetId` | `string` | yes | Target dataset ID. |
+| `items` | `object \| object[]` | yes | A single item or an array of items. |
+
+**Output:** none (resolves once the items are stored).
+**Apify API:** [`POST /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-post)
+
+```js
+const ds = await apify.dataset.create();
+await apify.dataset.pushItems({ datasetId: ds.id, items: [{ a: 1 }, { a: 2 }] });
+const { items } = await apify.dataset.listItems({ datasetId: ds.id });
+```
+
+### `dataset.listItems({ datasetId, fields?, omit?, limit?, offset?, clean?, desc? })` → `{ items, count, offset, limit, desc }`
+
+Read the dataset. Dual-mode — see [Conventions](#conventions): `await` for one
+page, `for await` to auto-paginate through everything (replaces what used to
+be a separate `iterate()` method — one name, one method, both jobs).
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `datasetId` | `string` | yes | Dataset ID. |
+| `fields` | `string[]` | no | Only include these fields (joined into `fields`). |
+| `omit` | `string[]` | no | Exclude these fields. |
+| `limit` | `number` | no | Page size (`await` mode) / items fetched per page (`for await` mode). Omit for the API's own default (effectively unbounded — a single `await` then returns everything in one page). |
+| `offset` | `number` | no | Starting offset. Default `0`. |
+| `clean` | `boolean` | no | Skip empty items / hidden fields (`clean=1`). |
+| `desc` | `boolean` | no | Reverse (newest first, `desc=1`). |
+
+**Output (custom):**
+- `await apify.dataset.listItems({...})` → one page: `{ items: object[], count,
+  offset, limit, desc }`. `offset`/`limit`/`desc` echo what the API actually
+  applied (read from its `x-apify-pagination-*` response headers, not just
+  the request); `count` is this page's actual item count. **No `total`** —
+  the API's `x-apify-pagination-total` header is unreliable for
+  freshly-created datasets (eventually consistent); use
+  [`inferFields`](#datasetinferfields--schema) for an approximate count.
+- `for await (const item of apify.dataset.listItems({...}))` → every item in
+  the dataset, one at a time, paging internally. Stops when a page comes back
+  shorter than requested (the natural end-of-data signal).
+
+**Apify API:** [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get) (paged internally for `for await`)
+
+```js
+// One page
+const { items, count } = await apify.dataset.listItems({ datasetId, limit: 100 });
+console.log(`${count} items on this page`);
+
+// Every item
+let total = 0;
+for await (const item of apify.dataset.listItems({ datasetId })) total++;
+console.log('total items:', total);
+```
+
+### `dataset.inferFields({ datasetId, sample? })` → `Schema`
+
+Infer a lightweight schema from a sample of items (Apify has no schema endpoint).
+
+| Param | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `datasetId` | `string` | yes | | Dataset ID. |
+| `sample` | `number` | no | `5` | Number of items to inspect. |
+
+**Output (custom):**
+
+```js
+{
+  itemCount,          // number | undefined — from the dataset metadata (eventually consistent)
+  sampleSize,         // number of items actually inspected
+  fields: [           // one entry per field seen across the sample
+    {
+      name,           // field name
+      types,          // string[], e.g. ['string'] or ['number','null']
+      nullable        // boolean — true if any sampled value was null
+    }
+  ]
+}
+```
+
+**Apify API:** [`GET /v2/datasets/{datasetId}`](https://docs.apify.com/api/v2/dataset-get)
+(for `itemCount`) + [`GET /v2/datasets/{datasetId}/items`](https://docs.apify.com/api/v2/dataset-items-get) (the sample)
+
+---
+
+## `apify.keyValueStore`
+
+### `keyValueStore.create({ name? })` → `KeyValueStore`
+
+Create a key-value store and return its record.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `name` | `string` | no | Named (persistent) store; omit for an unnamed (temporary) one. |
+
+**Output:** the key-value store's record object (unwrapped `data`).
+**Apify API:** [`POST /v2/key-value-stores`](https://docs.apify.com/api/v2/key-value-stores-post)
+
+### `keyValueStore.set({ storeId, key, value, contentType? })` → `void`
+
+Write a record. The content type is inferred from `value`:
+
+| `value` type | Stored as |
+|---|---|
+| `object` | `application/json; charset=utf-8` |
+| `string` | `text/plain; charset=utf-8` |
+| `Uint8Array` / `ArrayBuffer` | `application/octet-stream` |
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `storeId` | `string` | yes | Store ID. |
+| `key` | `string` | yes | Record key. |
+| `value` | `object \| string \| Uint8Array \| ArrayBuffer` | yes | Value to store. |
+| `contentType` | `string` | no | Override the inferred content type. |
+
+**Output:** none (resolves once the record is stored).
+**Apify API:** [`PUT /v2/key-value-stores/{storeId}/records/{key}`](https://docs.apify.com/api/v2/key-value-store-record-put)
+
+### `keyValueStore.get({ storeId, key })` → `value` \| `null`
+
+Read a record.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `storeId` | `string` | yes | Store ID. |
+| `key` | `string` | yes | Record key. |
+
+**Output (custom):** the value, typed by the stored content type —
+
+- `application/json` → parsed **object**
+- `text/*` → **string**
+- anything else → **`Uint8Array`**
+
+Returns **`null`** when the key does not exist (404) instead of throwing, so you
+can do lookup-or-default without a `try/catch`.
+**Apify API:** [`GET /v2/key-value-stores/{storeId}/records/{key}`](https://docs.apify.com/api/v2/key-value-store-record-get)
+
+```js
+const kv = await apify.keyValueStore.create();
+await apify.keyValueStore.set({ storeId: kv.id, key: 'state', value: { seen: [] } });
+const state = await apify.keyValueStore.get({ storeId: kv.id, key: 'state' }); // → { seen: [] }
+const missing = await apify.keyValueStore.get({ storeId: kv.id, key: 'nope' }); // → null
+```
+
+### `keyValueStore.list({ storeId, limit?, exclusiveStartKey? })` → `{ items, … }`
+
+List keys in a store.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `storeId` | `string` | yes | Store ID. |
+| `limit` | `number` | no | Max keys to return. |
+| `exclusiveStartKey` | `string` | no | Continue listing after this key (pagination). |
+
+**Output:** the unwrapped `data`: `{ items: [{ key, size }], count, limit,
+isTruncated, exclusiveStartKey, nextExclusiveStartKey }`.
+**Apify API:** [`GET /v2/key-value-stores/{storeId}/keys`](https://docs.apify.com/api/v2/key-value-store-keys-get)
+
+---
+
+## `console`
+
+`console` is captured, not printed live:
+
+| Method | Stream |
+|---|---|
+| `console.log`, `console.info` | **stdout** |
+| `console.error`, `console.warn` | **stderr** |
+
+Non-string arguments are `JSON.stringify`'d. When the script finishes, both
+streams and the script's exit status are written to the run's default dataset as
+a single item:
+
+```json
+{ "stdout": "...", "stderr": "...", "exitCode": 0 }
+```
+
+`exitCode` is the script's effective exit status: `0` when it returns normally,
+`1` when it throws. It is distinct from the Actor run's status — see below.
+
+## Error handling
+
+- A non-2xx API response throws `Error: <METHOD> <path> failed: <status> <body>`.
+- If your script throws, the error (stack/message) is appended to **stderr**,
+  `exitCode` is set to `1`, and the run still **succeeds** with whatever was
+  printed beforehand — so failures are observable in the output rather than
+  crashing the run. Check `exitCode` (not `stderr`) to detect a failed script:
+  `stderr` may be non-empty from ordinary `console.error` / `console.warn`
+  logging even on a successful run.

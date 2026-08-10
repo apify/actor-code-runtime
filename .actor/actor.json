@@ -1,0 +1,94 @@
+{
+    "actorSpecification": 1,
+    "name": "code-runtime",
+    "title": "Code Runtime",
+    "description": "Runs one JS script in a sandboxed Actor with an apify binding (Actors, datasets, KV stores). Worth it for bulk work: 50+ record filter/sort/aggregate, or 10+ item fan-out (e.g. many page visits). Skip for a single <10-item lookup \u2014 call the Actor directly instead. Read the README first.",
+    "version": "0.1",
+    "buildTag": "latest",
+    "usesStandbyMode": false,
+    "defaultRunOptions": {
+        "timeoutSecs": 900,
+        "memoryMbytes": 1024
+    },
+    "input": {
+        "title": "Code Runtime Input",
+        "description": "The program to run inside the sandbox.",
+        "type": "object",
+        "schemaVersion": 1,
+        "properties": {
+            "code": {
+                "title": "Code",
+                "type": "string",
+                "description": "JavaScript executed in the sandbox with `apify` and `console` globals; only console output is captured and pushed to the dataset as { stdout, stderr, exitCode, statusMessage } — a top-level `return` value is NOT captured. Before writing code that calls a specific Actor, check its real input field names first — via fetch-actor-details (outside this script, before you write it) or apify.actor.get({ actorId }) (inside it, for an Actor picked at runtime). Do not guess field names from memory; a wrong one throws a fast 400, but costs a wasted round trip. Print a small JSON summary of the result — never dump full datasets. Write top-level `await` statements directly in the script; do NOT wrap your logic in an async function you call without awaiting (e.g. `async function main(){...}; main()`) — the script returns as soon as the top-level body finishes, silently discarding anything still pending, with no error. Every apify.* method takes ONE options object keyed by id, e.g. apify.actor.call({ actorId, input }), apify.dataset.listItems({ datasetId, limit }) — this is NOT the public apify-client SDK's curried apify.actor(id).call(input) shape. If a prior attempt already logged a nested run's defaultDatasetId/defaultKeyValueStoreId (visible in your own earlier turns), reuse it — do NOT re-run the same Actor call with identical input, that wastes compute on a call that already succeeded. apify.actor.call/run.waitForFinish may return non-terminal (READY/RUNNING) once the 60s wait cap elapses — that is NOT a failure, poll again instead of throwing.",
+                "editor": "javascript"
+            },
+            "maxActorRuns": {
+                "title": "Max Actor runs",
+                "type": "integer",
+                "description": "Caps how many Actor runs this script may start in total across actor.start/actor.call/actor.callAndGetItems. Starting one more once the limit is reached throws inside the script. Omit for no limit.",
+                "minimum": 1
+            },
+            "maxTotalChargeUsd": {
+                "title": "Max total charge (USD)",
+                "type": "number",
+                "description": "Execution-wide spending budget across every Actor run this script starts — distinct from a single call's own maxTotalChargeUsd, which only caps that one run. Each run's own cap is clamped so the combined total never exceeds this budget; starting a run once it's exhausted throws inside the script. Omit for no limit.",
+                "minimum": 0
+            },
+            "defaultTimeoutSecs": {
+                "title": "Default Actor run timeout (seconds)",
+                "type": "integer",
+                "description": "Applied as timeoutSecs to actor.start/actor.call/actor.callAndGetItems calls that don't specify their own. Omit to use the Apify API's own default.",
+                "minimum": 1
+            }
+        },
+        "required": ["code"]
+    },
+    "output": {
+        "actorOutputSchemaVersion": 1,
+        "title": "Code Runtime Output",
+        "description": "One dataset item { stdout, stderr, exitCode, statusMessage } (exitCode: 0=returned, 1=threw); see the exitCode field description for the timeout/OOM case.",
+        "type": "object",
+        "properties": {
+            "output": {
+                "type": "string",
+                "title": "Execution output",
+                "template": "{{links.apiDefaultDatasetUrl}}/items"
+            }
+        }
+    },
+    "storages": {
+        "dataset": {
+            "actorSpecification": 1,
+            "description": "Present only if the script ran to completion (returned or threw). A run-level timeout or OOM kill produces zero items for that run — the calling Actor-run's own status (SUCCEEDED vs FAILED/TIMED-OUT) is the signal for that case, not item presence.",
+            "fields": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "stdout": {
+                        "type": "string",
+                        "title": "stdout",
+                        "description": "Captured console.log/console.info output."
+                    },
+                    "stderr": {
+                        "type": "string",
+                        "title": "stderr",
+                        "description": "Captured console.error/console.warn output, plus the thrown error (or compile failure) message when exitCode is 1."
+                    },
+                    "exitCode": {
+                        "type": "integer",
+                        "enum": [0, 1],
+                        "title": "Exit code",
+                        "description": "0 = script returned normally, 1 = script threw (or failed to compile)."
+                    },
+                    "statusMessage": {
+                        "type": "string",
+                        "title": "Status message",
+                        "description": "Prose form of the same signal: 'Script completed' / 'Script threw: ...' / 'Failed to compile: ...'."
+                    }
+                },
+                "required": ["stdout", "stderr", "exitCode", "statusMessage"]
+            }
+        }
+    },
+    "dockerfile": "../Dockerfile"
+}
