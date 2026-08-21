@@ -2,7 +2,7 @@
     "actorSpecification": 1,
     "name": "code-runtime",
     "title": "Code Runtime",
-    "description": "Runs one JS script in a sandboxed Actor with an apify binding (Actors, datasets, KV stores). Worth it for bulk work: 50+ record filter/sort/aggregate, or 10+ item fan-out (e.g. many page visits). Skip for a single <10-item lookup \u2014 call the Actor directly instead. Read the README first.",
+    "description": "Runs one JS script in a sandboxed Actor with an apify binding (Actors, datasets, KV stores). Worth it for bulk work: 50+ record filter/sort/aggregate, or 10+ item fan-out (e.g. many page visits). Skip for a single <10-item lookup \u2014 call the Actor directly instead. MANDATORY: read the README first.",
     "version": "0.1",
     "buildTag": "latest",
     "usesStandbyMode": false,
